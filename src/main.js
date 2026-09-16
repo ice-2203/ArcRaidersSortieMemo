@@ -84,10 +84,9 @@ function findMemberPartyIndex(sortie, memberId) {
 
 function removeMemberFromParties(sortie, memberId) {
   const parties = ensureParties(sortie);
-  // 空になってもスロットは残す
   sortie.parties = parties.map((p) => p.filter((id) => id !== memberId));
   if (!sortie.parties.length) sortie.parties = [[]];
-  sortie.memberIds = sortie.parties.flat();
+  compactEmptyParties(sortie);
 }
 
 function addMemberToParty(sortie, memberId, partyIndex) {
@@ -99,7 +98,7 @@ function addMemberToParty(sortie, memberId, partyIndex) {
   if (!alreadyHere && sortie.parties[idx].length >= PARTY_SIZE) {
     return { ok: false, reason: 'full', partyIndex: idx };
   }
-  // 他パーティから外してから入れる（空スロットは維持）
+  // 他パーティから外してから入れる
   sortie.parties = sortie.parties.map((p, i) =>
     i === idx ? p : p.filter((id) => id !== memberId)
   );
@@ -109,8 +108,25 @@ function addMemberToParty(sortie, memberId, partyIndex) {
     }
     sortie.parties[idx].push(memberId);
   }
+  compactEmptyParties(sortie);
+  // 詰め後にメンバーがいるパーティ番号を返す
+  idx = findMemberPartyIndex(sortie, memberId);
+  return { ok: true, partyIndex: Math.max(0, idx) };
+}
+
+/** 途中の空パーティを詰め、末尾の空枠（+追加用）は最大1つ残す */
+function compactEmptyParties(sortie) {
+  if (!sortie || !Array.isArray(sortie.parties)) return [[]];
+  let end = sortie.parties.length;
+  while (end > 1 && (!sortie.parties[end - 1] || sortie.parties[end - 1].length === 0)) {
+    end -= 1;
+  }
+  const trailingEmpty = sortie.parties.length - end;
+  const filled = sortie.parties.slice(0, end).filter((p) => Array.isArray(p) && p.length > 0);
+  sortie.parties = filled.length ? filled : [[]];
+  if (trailingEmpty > 0 && filled.length > 0) sortie.parties.push([]);
   sortie.memberIds = sortie.parties.flat();
-  return { ok: true, partyIndex: idx };
+  return sortie.parties;
 }
 
 /** 指定パーティのメンバーをまとめて置き換え（最大 PARTY_SIZE） */
@@ -122,7 +138,7 @@ function setPartyMembers(sortie, partyIndex, memberIds) {
     i === partyIndex ? [] : p.filter((id) => !ids.includes(id))
   );
   sortie.parties[partyIndex] = ids;
-  sortie.memberIds = sortie.parties.flat();
+  compactEmptyParties(sortie);
 }
 
 function addEmptyParty(sortie) {

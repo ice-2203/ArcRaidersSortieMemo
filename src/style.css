@@ -473,7 +473,8 @@ input {
 
 .trial-card-sched {
   border-top: 1px solid var(--border);
-  padding: 10px 12px 12px;
+  /* 右パディングを減らして縦スクロールバーをカード右端寄りに */
+  padding: 10px 2px 12px 12px;
   background: rgba(0, 0, 0, 0.14);
   flex: 1 1 auto;
   min-height: 0;
@@ -491,11 +492,16 @@ input {
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
+  padding-right: 2px;
+  box-sizing: border-box;
 }
 
 .mp-time-item {
   appearance: none;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin-right: 6px;
   text-align: left;
   font-family: var(--fmono);
   font-size: 11px;
@@ -1282,8 +1288,9 @@ input {
   align-items: stretch;
   gap: 6px;
   margin-bottom: 10px;
+  margin-right: 8px;
   min-width: 0;
-  width: 100%;
+  width: auto;
   max-width: 100%;
   box-sizing: border-box;
   overflow: hidden;
@@ -1481,7 +1488,8 @@ input {
 .party-pane {
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 10px;
+  /* 右を狭めて縦スクロールバーを枠右端寄りに */
+  padding: 10px 2px 10px 10px;
   background: rgba(255, 255, 255, 0.02);
   min-height: 180px;
   min-width: 0;
@@ -1495,6 +1503,7 @@ input {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+  margin-right: 8px;
   flex: 0 0 auto;
 }
 
@@ -1520,12 +1529,16 @@ input {
   overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  padding-right: 2px;
+  box-sizing: border-box;
 }
 
 .party-list--modal .party-group {
   flex: 0 0 auto;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   min-width: 0;
+  margin-right: 6px;
   box-sizing: border-box;
 }
 
@@ -1676,6 +1689,15 @@ input {
   gap: 4px;
   max-height: min(36vh, 320px);
   overflow: auto;
+  padding-right: 2px;
+  box-sizing: border-box;
+}
+
+.member-pick-list .member-pick {
+  margin-right: 6px;
+  width: auto;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .party-fill-sheet {
