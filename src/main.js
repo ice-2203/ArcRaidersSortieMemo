@@ -416,6 +416,7 @@ async function copyText(text) {
 
 function closeModal({ keepParty = false } = {}) {
   modal = null;
+  openPartyModal._repaint = null;
   document.querySelector('.modal-backdrop')?.remove();
   if (!keepParty) {
     partySortieId = null;
@@ -449,7 +450,7 @@ async function filesToMembers(files) {
   if (images.length) {
     persist();
     showToast(`${images.length}人を登録しました`);
-    refreshUi();
+    if (!repaintPartyModal()) refreshUi();
   }
 }
 
@@ -602,13 +603,28 @@ function refreshUi() {
   }
 }
 
+/** 出撃メンバーモーダルが開いていれば中身だけ描き直し（入力欄を潰さない） */
+function repaintPartyModal() {
+  if (!modal || !partySortieId) return false;
+  if (typeof openPartyModal._repaint !== 'function') return false;
+  if (!state.sorties.some((s) => s.id === partySortieId)) {
+    closeModal();
+    render();
+    return true;
+  }
+  openPartyModal._repaint();
+  return true;
+}
+
 function removeSortieMember(sortieId, memberId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   removeMemberFromParties(sortie, memberId);
   persist();
-  render();
-  openPartyModal(sortieId);
+  if (!repaintPartyModal()) {
+    render();
+    openPartyModal(sortieId);
+  }
 }
 
 function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true } = {}) {
@@ -620,8 +636,10 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     if (toggleIfSame) {
       removeMemberFromParties(sortie, memberId);
       persist();
-      render();
-      openPartyModal(sortieId);
+      if (!repaintPartyModal()) {
+        render();
+        openPartyModal(sortieId);
+      }
     }
     return;
   }
@@ -636,8 +654,10 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     return;
   }
   persist();
-  render();
-  openPartyModal(sortieId);
+  if (!repaintPartyModal()) {
+    render();
+    openPartyModal(sortieId);
+  }
 }
 
 const MEMBER_DRAG_TYPE = 'application/x-sortie-member';
@@ -911,6 +931,25 @@ function openPartyModal(sortieId) {
   paintParties();
   paintMembers();
 
+  openPartyModal._repaint = () => {
+    const live = state.sorties.find((s) => s.id === sortieId);
+    if (!live) {
+      closeModal();
+      render();
+      return;
+    }
+    // 同一オブジェクトを見続ける（persist 後も state 内の参照）
+    Object.assign(sortie, live);
+    targetParty = Math.min(
+      Math.max(0, openPartyModal._targetParty ?? targetParty),
+      Math.max(0, ensureParties(sortie).length - 1)
+    );
+    openPartyModal._targetParty = targetParty;
+    heldMemberId = openPartyModal._heldMemberId || null;
+    paintParties();
+    paintMembers();
+  };
+
   const drop = modalEl.querySelector('[data-drop]');
   drop.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -935,9 +974,12 @@ function openPartyModal(sortieId) {
       showToast(`パーティ${targetParty + 1}は満員です。別パーティを選んでください`);
     } else {
       openPartyModal._targetParty = res.partyIndex ?? targetParty;
+      targetParty = openPartyModal._targetParty;
     }
-    render();
-    openPartyModal(sortie.id);
+    if (!repaintPartyModal()) {
+      render();
+      openPartyModal(sortie.id);
+    }
   };
   modalEl.querySelector('[data-add]').addEventListener('click', doAdd);
   nameInput.addEventListener('keydown', (e) => {
@@ -948,7 +990,10 @@ function openPartyModal(sortieId) {
     const res = addEmptyParty(sortie);
     persist();
     openPartyModal._targetParty = res.partyIndex;
-    openPartyModal(sortie.id);
+    targetParty = res.partyIndex;
+    if (!repaintPartyModal()) {
+      openPartyModal(sortie.id);
+    }
   });
 
   modalEl.querySelector('[data-discord]').addEventListener('click', () => {

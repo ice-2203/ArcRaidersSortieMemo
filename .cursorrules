@@ -1,0 +1,8 @@
+# コミットメッセージ生成
+
+Generate commit messages in Japanese only.
+ソース管理の「Generate commit message」でも必ず日本語で書く。英語だけのメッセージは出さない。
+
+- 1行目は簡潔な要約（例: `出撃予定の共有同期を追加`）
+- 必要なら2行目以降に補足を日本語で書く
+- Conventional Commits の英語プレフィックス（fix: / feat: など）は使わない
