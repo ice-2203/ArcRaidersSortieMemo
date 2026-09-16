@@ -89,6 +89,25 @@ function removeMemberFromParties(sortie, memberId) {
   compactEmptyParties(sortie);
 }
 
+/** 名簿から削除し、全出撃のパーティからも外す */
+function deleteMemberFromRoster(memberId) {
+  if (!memberId) return false;
+  const member = state.members.find((m) => m.id === memberId);
+  if (!member) return false;
+  const inParties = state.sorties.some((s) => findMemberPartyIndex(s, memberId) >= 0);
+  const label = member.name || 'このメンバー';
+  const msg = inParties
+    ? `「${label}」を名簿から削除しますか？\n参加中のパーティからも外れます。`
+    : `「${label}」を名簿から削除しますか？`;
+  if (!confirm(msg)) return false;
+  state.members = state.members.filter((m) => m.id !== memberId);
+  for (const s of state.sorties) {
+    removeMemberFromParties(s, memberId);
+  }
+  persist();
+  return true;
+}
+
 function addMemberToParty(sortie, memberId, partyIndex) {
   ensureParties(sortie);
   let idx = partyIndex;
@@ -114,17 +133,11 @@ function addMemberToParty(sortie, memberId, partyIndex) {
   return { ok: true, partyIndex: Math.max(0, idx) };
 }
 
-/** 途中の空パーティを詰め、末尾の空枠（+追加用）は最大1つ残す */
+/** 空パーティをすべて除去（1つも無いときは空枠を1つだけ残す） */
 function compactEmptyParties(sortie) {
   if (!sortie || !Array.isArray(sortie.parties)) return [[]];
-  let end = sortie.parties.length;
-  while (end > 1 && (!sortie.parties[end - 1] || sortie.parties[end - 1].length === 0)) {
-    end -= 1;
-  }
-  const trailingEmpty = sortie.parties.length - end;
-  const filled = sortie.parties.slice(0, end).filter((p) => Array.isArray(p) && p.length > 0);
+  const filled = sortie.parties.filter((p) => Array.isArray(p) && p.length > 0);
   sortie.parties = filled.length ? filled : [[]];
-  if (trailingEmpty > 0 && filled.length > 0) sortie.parties.push([]);
   sortie.memberIds = sortie.parties.flat();
   return sortie.parties;
 }
@@ -154,6 +167,7 @@ function addEmptyParty(sortie) {
 function refreshSortieRoster(sortie) {
   if (!sortie) return;
   ensureParties(sortie);
+  compactEmptyParties(sortie);
   const next = { ...(sortie.roster && typeof sortie.roster === 'object' ? sortie.roster : {}) };
   const used = new Set(sortie.memberIds);
   for (const id of used) {
@@ -248,6 +262,7 @@ async function pullBoard({ migrateLocal = false } = {}) {
 
   state.sorties = board.sorties;
   state.members = Array.isArray(board.members) ? board.members : [];
+  for (const s of state.sorties) compactEmptyParties(s);
   saveState(state);
   boardReady = true;
   boardError = '';
@@ -735,10 +750,18 @@ function openPartyModal(sortieId) {
   let fillSelected = new Set();
 
   const closeFillSheet = () => {
+    const wasOpen = fillPartyIndex != null;
     fillPartyIndex = null;
     fillSelected = new Set();
     fillSheet.hidden = true;
     fillSheet.replaceChildren();
+    // 「+ 追加」だけして戻ったときなど、空パーティを残さない
+    if (wasOpen) {
+      compactEmptyParties(getSortie());
+      persist({ skipSync: true, sortieId });
+      paintParties();
+      updateMemberMarks();
+    }
   };
 
   const bindMemberDrag = (el, memberId) => {
@@ -980,8 +1003,7 @@ function openPartyModal(sortieId) {
     }
     for (const m of sorted) {
       const partyIdx = findMemberPartyIndex(live, m.id);
-      const row = document.createElement('button');
-      row.type = 'button';
+      const row = document.createElement('div');
       row.dataset.memberId = m.id;
       row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}`;
       row.appendChild(avatarNode(m));
@@ -991,7 +1013,22 @@ function openPartyModal(sortieId) {
       const mark = document.createElement('span');
       mark.className = 'pick-mark';
       mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
-      row.append(name, mark);
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'member-pick-remove';
+      del.setAttribute('aria-label', `${m.name}を名簿から削除`);
+      del.title = '名簿から削除';
+      del.textContent = '×';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!deleteMemberFromRoster(m.id)) return;
+        if (!repaintPartyModal()) {
+          render();
+          openPartyModal(sortieId);
+        }
+        showToast(`${m.name} を名簿から削除しました`);
+      });
+      row.append(name, mark, del);
       bindMemberDrag(row, m.id);
       row.addEventListener('click', () => {
         if (partyIdx >= 0) {
