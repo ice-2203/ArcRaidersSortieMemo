@@ -1078,6 +1078,54 @@ input {
   max-width: 920px;
 }
 
+.member-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.member-filter-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.member-filter-open.is-on {
+  border-color: rgba(34, 184, 255, 0.55);
+  background: rgba(34, 184, 255, 0.12);
+  color: var(--text);
+}
+
+.member-filter-clear {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+}
+
+.modal-member-filter {
+  width: min(420px, 100%);
+  max-height: min(80vh, 640px);
+  display: flex;
+  flex-direction: column;
+}
+
+.member-filter-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(50vh, 420px);
+  overflow: auto;
+  margin: 8px 0 12px;
+  -webkit-overflow-scrolling: touch;
+}
+
 .sortie-day-head {
   margin: 0 0 10px;
   font-family: var(--fhead);

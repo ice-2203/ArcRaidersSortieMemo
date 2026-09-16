@@ -10,6 +10,8 @@ import { fetchSharedBoard, pushSharedBoard } from './sync.js';
 import { SERVER_REGIONS, regionAbbr, regionLabel, MAP_OPTIONS, EVENT_OPTIONS, eventType, mapJa } from './names.js';
 
 const WEEK_MODE_KEY = 'arcraiders.sortieMemo.weekMode';
+const SCHED_FILTER_KEY = 'arcraiders.sortieMemo.schedFilter';
+const MEMBER_FILTER_KEY = 'arcraiders.sortieMemo.memberFilter';
 
 function loadWeekMode() {
   try {
@@ -17,6 +19,41 @@ function loadWeekMode() {
     return v === 'next' ? 'next' : 'current';
   } catch {
     return 'current';
+  }
+}
+
+function loadSchedFilter() {
+  try {
+    const v = localStorage.getItem(SCHED_FILTER_KEY);
+    return v === 'registered' ? 'registered' : 'all';
+  } catch {
+    return 'all';
+  }
+}
+
+function saveSchedFilter(filter) {
+  try {
+    localStorage.setItem(SCHED_FILTER_KEY, filter);
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadMemberFilterIds() {
+  try {
+    const raw = localStorage.getItem(MEMBER_FILTER_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(list) ? list.map(String).filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveMemberFilterIds(ids) {
+  try {
+    localStorage.setItem(MEMBER_FILTER_KEY, JSON.stringify([...ids]));
+  } catch {
+    /* ignore */
   }
 }
 
@@ -33,11 +70,78 @@ let loadError = '';
 let loading = false;
 let selectedRegions = SERVER_REGIONS.map((r) => r.slug);
 /** @type {'all' | 'registered'} */
-let schedFilter = 'all';
+let schedFilter = loadSchedFilter();
 /** @type {'current' | 'next'} */
 let weekMode = loadWeekMode();
+/** 出撃のみ表示時のメンバー絞り込み（選択した人が全員参加している出撃） */
+let memberFilterIds = loadMemberFilterIds();
 /** トライアル横レールの scrollLeft（再描画で飛ばないよう保持） */
 let trialRailScrollLeft = 0;
+/** カード内予定一覧の scrollTop（trialId → 位置） */
+const trialSchedScrollTop = new Map();
+/** 出撃のみタイムラインの scrollTop */
+let registeredTimelineScrollTop = 0;
+
+function captureSchedScrolls() {
+  const rail = app.querySelector('.trial-rail');
+  if (rail) {
+    rail.querySelectorAll('.trial-card[data-trial-id]').forEach((card) => {
+      const id = card.dataset.trialId;
+      const list = card.querySelector('.mp-time-list');
+      if (id && list) trialSchedScrollTop.set(String(id), list.scrollTop);
+    });
+  }
+  const wrap = app.querySelector('.sortie-timeline-wrap');
+  if (wrap) registeredTimelineScrollTop = wrap.scrollTop;
+}
+
+function restoreSchedScrolls() {
+  const rail = app.querySelector('.trial-rail');
+  if (rail) {
+    rail.querySelectorAll('.trial-card[data-trial-id]').forEach((card) => {
+      const id = String(card.dataset.trialId || '');
+      const list = card.querySelector('.mp-time-list');
+      if (!list || !id) return;
+      const top = trialSchedScrollTop.get(id);
+      if (!Number.isFinite(top) || top <= 0) return;
+      const apply = () => {
+        list.scrollTop = top;
+      };
+      apply();
+      requestAnimationFrame(() => {
+        apply();
+        requestAnimationFrame(apply);
+      });
+      list.addEventListener(
+        'scroll',
+        () => {
+          if (modal) return;
+          trialSchedScrollTop.set(id, list.scrollTop);
+        },
+        { passive: true }
+      );
+    });
+  }
+  const wrap = app.querySelector('.sortie-timeline-wrap');
+  if (wrap && registeredTimelineScrollTop > 0) {
+    const apply = () => {
+      wrap.scrollTop = registeredTimelineScrollTop;
+    };
+    apply();
+    requestAnimationFrame(() => {
+      apply();
+      requestAnimationFrame(apply);
+    });
+    wrap.addEventListener(
+      'scroll',
+      () => {
+        if (modal) return;
+        registeredTimelineScrollTop = wrap.scrollTop;
+      },
+      { passive: true }
+    );
+  }
+}
 
 function visibleTrials() {
   return weekMode === 'next' ? trialsNext : trialsCurrent;
@@ -75,6 +179,21 @@ function ensureParties(sortie) {
 
 function partyMemberLists(sortie) {
   return ensureParties(sortie).map((ids) => ids.map((id) => memberById(id, sortie)).filter(Boolean));
+}
+
+function sortieMemberIdSet(sortie) {
+  ensureParties(sortie);
+  return new Set((sortie.memberIds || []).filter(Boolean));
+}
+
+/** 選択メンバーがすべて参加している出撃か（未選択ならすべて対象） */
+function sortieMatchesMemberFilter(sortie, selectedIds = memberFilterIds) {
+  if (!selectedIds || selectedIds.size === 0) return true;
+  const inSortie = sortieMemberIdSet(sortie);
+  for (const id of selectedIds) {
+    if (!inSortie.has(id)) return false;
+  }
+  return true;
 }
 
 function findMemberPartyIndex(sortie, memberId) {
@@ -687,14 +806,19 @@ function refreshTrialCardInRail(trialId, scrollLeft) {
     render({ keepRailScroll: keep });
     return false;
   }
+  const oldList = old.querySelector('.mp-time-list');
+  if (oldList) trialSchedScrollTop.set(String(trialId), oldList.scrollTop);
+  const keepSchedTop = trialSchedScrollTop.get(String(trialId)) || 0;
   // 差し替え中に scroll-snap が先頭へ吸着しないようにする
   const prevSnap = rail.style.scrollSnapType;
   rail.style.scrollSnapType = 'none';
   const next = renderTrialCard(trial);
   old.replaceWith(next);
+  const nextList = next.querySelector('.mp-time-list');
   const restore = () => {
     rail.scrollLeft = keep;
     trialRailScrollLeft = keep;
+    if (nextList && keepSchedTop > 0) nextList.scrollTop = keepSchedTop;
   };
   restore();
   requestAnimationFrame(() => {
@@ -711,6 +835,16 @@ function refreshTrialCardInRail(trialId, scrollLeft) {
       }
     });
   });
+  if (nextList) {
+    nextList.addEventListener(
+      'scroll',
+      () => {
+        if (modal) return;
+        trialSchedScrollTop.set(String(trialId), nextList.scrollTop);
+      },
+      { passive: true }
+    );
+  }
   return true;
 }
 
@@ -1731,10 +1865,124 @@ function renderTrialCard(trial) {
   return card;
 }
 
+/** 出撃のみ：メンバー絞り込みピッカー */
+function openMemberFilterModal() {
+  const draft = new Set(memberFilterIds);
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop modal-backdrop--confirm';
+  const modalEl = document.createElement('div');
+  modalEl.className = 'modal modal-member-filter';
+
+  const paint = () => {
+    const sorted = [...state.members].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+    modalEl.innerHTML = `
+      <div class="party-modal-head">
+        <h3>メンバーで絞り込み</h3>
+        <button type="button" class="btn btn-ghost" data-act="cancel">閉じる</button>
+      </div>
+      <p class="hint">選んだ人が全員参加している出撃だけ表示します（${draft.size}人選択中）</p>
+      <div class="member-filter-pick-list" data-list></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-act="clear">クリア</button>
+        <button type="button" class="btn btn-primary" data-act="apply">適用</button>
+      </div>
+    `;
+    const list = modalEl.querySelector('[data-list]');
+    if (!sorted.length) {
+      list.innerHTML = '<p class="hint">名簿が空です</p>';
+    } else {
+      for (const m of sorted) {
+        const on = draft.has(m.id);
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = `member-pick${on ? ' is-on' : ''}`;
+        const check = document.createElement('span');
+        check.className = `pick-check${on ? ' is-on' : ''}`;
+        check.setAttribute('aria-hidden', 'true');
+        check.textContent = on ? '✓' : '';
+        row.appendChild(check);
+        row.appendChild(avatarNode(m));
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = m.name;
+        row.appendChild(name);
+        row.addEventListener('click', () => {
+          if (draft.has(m.id)) draft.delete(m.id);
+          else draft.add(m.id);
+          paint();
+        });
+        list.appendChild(row);
+      }
+    }
+    modalEl.querySelector('[data-act="cancel"]').addEventListener('click', () => backdrop.remove());
+    modalEl.querySelector('[data-act="clear"]').addEventListener('click', () => {
+      draft.clear();
+      paint();
+    });
+    modalEl.querySelector('[data-act="apply"]').addEventListener('click', () => {
+      memberFilterIds = new Set(draft);
+      saveMemberFilterIds(memberFilterIds);
+      backdrop.remove();
+      render();
+    });
+  };
+
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) backdrop.remove();
+  });
+  paint();
+  backdrop.appendChild(modalEl);
+  document.body.appendChild(backdrop);
+}
+
+function memberFilterSummaryText() {
+  if (!memberFilterIds.size) return 'メンバーで絞り込み';
+  const names = state.members
+    .filter((m) => memberFilterIds.has(m.id))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
+    .map((m) => m.name);
+  if (names.length <= 2) return names.join('・');
+  return `${names.slice(0, 2).join('・')} 他${names.length - 2}人`;
+}
+
 /** 「出撃のみ」：時間順の縦一覧 */
 function renderRegisteredTimeline() {
   const root = document.createElement('div');
   root.className = 'sortie-timeline';
+
+  // 名簿に無い選択IDは落とす
+  const known = new Set(state.members.map((m) => m.id));
+  let filterDirty = false;
+  for (const id of [...memberFilterIds]) {
+    if (!known.has(id)) {
+      memberFilterIds.delete(id);
+      filterDirty = true;
+    }
+  }
+  if (filterDirty) saveMemberFilterIds(memberFilterIds);
+
+  const filterBar = document.createElement('div');
+  filterBar.className = 'member-filter-bar';
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = `btn member-filter-open${memberFilterIds.size ? ' is-on' : ''}`;
+  openBtn.textContent = memberFilterSummaryText();
+  openBtn.title = 'メンバーで出撃を絞り込み';
+  openBtn.addEventListener('click', () => openMemberFilterModal());
+  filterBar.appendChild(openBtn);
+  if (memberFilterIds.size > 0) {
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'btn btn-ghost member-filter-clear';
+    clear.textContent = '解除';
+    clear.addEventListener('click', () => {
+      memberFilterIds = new Set();
+      saveMemberFilterIds(memberFilterIds);
+      render();
+    });
+    filterBar.appendChild(clear);
+  }
+  root.appendChild(filterBar);
 
   const list = state.sorties
     .map((s) => {
@@ -1746,12 +1994,16 @@ function renderRegisteredTimeline() {
         endMs: Number.isFinite(endMs) ? endMs : startMs + 3600000,
       };
     })
-    .filter(({ startMs }) => !!startMs)
+    .filter(({ startMs, sortie }) => !!startMs && sortieMatchesMemberFilter(sortie))
     .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
 
   if (!list.length) {
-    root.innerHTML =
-      '<div class="empty-sorties">出撃登録がありません。表示を「すべて」にして枠を選んでください。</div>';
+    const empty = document.createElement('div');
+    empty.className = 'empty-sorties';
+    empty.textContent = memberFilterIds.size
+      ? '選択したメンバーが全員参加している出撃はありません'
+      : '出撃登録がありません。表示を「すべて」にして枠を選んでください。';
+    root.appendChild(empty);
     return root;
   }
 
@@ -1903,6 +2155,7 @@ function render(opts = {}) {
   const scrollY = window.scrollY;
   const prevRail = app.querySelector('.trial-rail');
   if (prevRail) trialRailScrollLeft = prevRail.scrollLeft;
+  captureSchedScrolls();
   const railScrollLeft = Number.isFinite(opts.keepRailScroll)
     ? opts.keepRailScroll
     : trialRailScrollLeft;
@@ -1994,6 +2247,7 @@ function render(opts = {}) {
     btn.textContent = opt.label;
     btn.addEventListener('click', () => {
       schedFilter = opt.id;
+      saveSchedFilter(schedFilter);
       render();
     });
     viewFilter.appendChild(btn);
@@ -2008,7 +2262,7 @@ function render(opts = {}) {
   hint.className = 'hint schedule-hint';
   hint.textContent =
     schedFilter === 'registered'
-      ? 'みんなの出撃予定を開始時刻順に表示します。行をタップするとメンバー編集できます。'
+      ? '「メンバーで絞り込み」から参加者を選べます。行をタップでメンバー編集。'
       : weekMode === 'next'
         ? '来週のトライアルです。マップ・イベントを選び、公開済みの時間枠があればメンバー登録できます。'
         : 'カード上部をタップしてマップ・イベントを選び、時間枠でメンバー登録。出撃予定は全員で共有されます。';
@@ -2065,6 +2319,7 @@ function render(opts = {}) {
       });
     }
   }
+  restoreSchedScrolls();
 }
 
 render();
