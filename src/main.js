@@ -345,11 +345,25 @@ function addMemberToParty(sortie, memberId, partyIndex) {
   return { ok: true, partyIndex: Math.max(0, idx) };
 }
 
-/** 空パーティをすべて除去（1つも無いときは空枠を1つだけ残す） */
-function compactEmptyParties(sortie) {
+/**
+ * 空パーティを整理する。
+ * - 通常: 空はすべて除去（1つも無いときは空枠を1つだけ残す）
+ * - keepTrailingEmpty: 途中の空は捨て、末尾の空枠は1つ残す（モーダル中の「+ 追加」用）
+ */
+function compactEmptyParties(sortie, opts = {}) {
   if (!sortie || !Array.isArray(sortie.parties)) return [[]];
-  const filled = sortie.parties.filter((p) => Array.isArray(p) && p.length > 0);
-  sortie.parties = filled.length ? filled : [[]];
+  const parties = sortie.parties.map((p) =>
+    Array.isArray(p) ? [...new Set(p.filter(Boolean))] : []
+  );
+  const filled = parties.filter((p) => p.length > 0);
+  const keepTrailing =
+    opts.keepTrailingEmpty ?? Boolean(modal && partySortieId);
+  if (keepTrailing) {
+    const wantTrailing = parties.length > 0 && parties[parties.length - 1].length === 0;
+    sortie.parties = wantTrailing ? [...filled, []] : filled.length ? filled : [[]];
+  } else {
+    sortie.parties = filled.length ? filled : [[]];
+  }
   sortie.memberIds = sortie.parties.flat();
   return sortie.parties;
 }
@@ -379,9 +393,12 @@ function addEmptyParty(sortie) {
 function refreshSortieRoster(sortie) {
   if (!sortie) return;
   ensureParties(sortie);
-  compactEmptyParties(sortie);
+  // 空パーティはここでは消さない（編集中の「+ 追加」が消えてしまう）
   const next = { ...(sortie.roster && typeof sortie.roster === 'object' ? sortie.roster : {}) };
-  const used = new Set(sortie.memberIds);
+  const used = new Set(
+    (Array.isArray(sortie.parties) ? sortie.parties.flat() : sortie.memberIds || []).filter(Boolean)
+  );
+  sortie.memberIds = [...used];
   for (const id of used) {
     const local = state.members.find((m) => m.id === id);
     const prev = next[id];
@@ -586,7 +603,7 @@ async function pushBoardNow() {
   const gen = boardLocalGen;
   try {
     for (const s of state.sorties) {
-      compactEmptyParties(s);
+      compactEmptyParties(s, { keepTrailingEmpty: false });
       reconcileSortieAgainstMembers(s);
       refreshSortieRoster(s);
     }
@@ -722,7 +739,7 @@ function openConfirmModal({
       <h3>${esc(title)}</h3>
       <p class="confirm-message">${esc(message)}</p>
       <div class="modal-actions">
-        <button type="button" class="btn btn-ghost" data-act="cancel">${esc(cancelLabel)}</button>
+        <button type="button" class="btn modal-close" data-act="cancel">${esc(cancelLabel)}</button>
         <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-act="ok">${esc(
           confirmLabel
         )}</button>
@@ -766,7 +783,7 @@ function openPromptModal({
         )}" autocomplete="off" />
       </div>
       <div class="modal-actions">
-        <button type="button" class="btn btn-ghost" data-act="cancel">${esc(cancelLabel)}</button>
+        <button type="button" class="btn modal-close" data-act="cancel">${esc(cancelLabel)}</button>
         <button type="button" class="btn btn-primary" data-act="ok">${esc(confirmLabel)}</button>
       </div>
     `;
@@ -964,38 +981,75 @@ async function editMemberAvatarFromRoster(memberId) {
     const paint = () => {
       const live = state.members.find((m) => m.id === memberId) || member;
       const src = live.avatarDataUrl || live.avatarUrl;
+      const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
+      const modKey = isMac ? '⌘' : 'Ctrl';
       modalEl.innerHTML = `
         <h3>アイコンを変更</h3>
         <p class="hint avatar-edit-name">${esc(live.name || '')}</p>
         <div class="avatar-edit-preview" data-preview></div>
-        <p class="hint">画像ファイル、またはクリップボードの画像（Ctrl+V / ⌘V）から設定できます。</p>
-        <div class="avatar-edit-actions">
-          <label class="btn btn-primary avatar-edit-file">
-            画像を選ぶ
-            <input type="file" accept="image/*" data-file hidden />
-          </label>
-          <button type="button" class="btn" data-act="paste">クリップボードから</button>
-          <button type="button" class="btn" data-act="clear"${src ? '' : ' disabled'}>アイコンを消す</button>
+        <div class="avatar-drop" data-drop tabindex="0" role="button" aria-label="画像をドロップ、クリック、または貼り付け">
+          <input type="file" accept="image/*" data-file hidden />
+          <p class="avatar-drop-main">
+            ここにドロップ / クリックして選択 /
+            <kbd class="kbd">${esc(modKey)}</kbd>
+            <span class="avatar-drop-plus">+</span>
+            <kbd class="kbd">V</kbd>
+            で貼り付け
+          </p>
+          <p class="avatar-drop-sub">画像をコピーしたあと、ここで貼り付けできます</p>
+          <button type="button" class="btn avatar-drop-paste" data-act="paste">クリップボードから取り込む</button>
         </div>
-        <div class="modal-actions">
-          <button type="button" class="btn btn-ghost" data-act="close">閉じる</button>
+        <div class="avatar-edit-footer">
+          <button type="button" class="btn btn-ghost" data-act="clear"${src ? '' : ' disabled'}>アイコンを消す</button>
+          <button type="button" class="btn modal-close" data-act="close">閉じる</button>
         </div>
       `;
       const preview = modalEl.querySelector('[data-preview]');
       preview.appendChild(avatarNode(live));
+      const drop = modalEl.querySelector('[data-drop]');
+      const fileInput = modalEl.querySelector('[data-file]');
+
       backdrop.onclick = (e) => {
         if (e.target === backdrop) finish(false);
       };
       modalEl.querySelector('[data-act="close"]').addEventListener('click', () => finish(true));
-      modalEl.querySelector('[data-act="paste"]').addEventListener('click', () => applyFromClipboard());
+      modalEl.querySelector('[data-act="paste"]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        applyFromClipboard();
+      });
       modalEl.querySelector('[data-act="clear"]').addEventListener('click', () => {
         applyMemberAvatar(memberId, null);
         showToast('アイコンを消しました');
         paint();
       });
-      modalEl.querySelector('[data-file]').addEventListener('change', async (e) => {
+      fileInput.addEventListener('change', async (e) => {
         const file = e.target.files?.[0];
         e.target.value = '';
+        await applyFromFile(file);
+      });
+      drop.addEventListener('click', (e) => {
+        if (e.target.closest('[data-act="paste"]')) return;
+        fileInput.click();
+      });
+      drop.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          fileInput.click();
+        }
+      });
+      drop.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        drop.classList.add('is-drag');
+      });
+      drop.addEventListener('dragleave', () => drop.classList.remove('is-drag'));
+      drop.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        drop.classList.remove('is-drag');
+        const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'));
+        if (!file) {
+          showToast('画像ファイルをドロップしてください');
+          return;
+        }
         await applyFromFile(file);
       });
     };
@@ -1010,8 +1064,8 @@ async function editMemberAvatarFromRoster(memberId) {
 
 async function removeSortieById(sortieId) {
   const ok = await openConfirmModal({
-    title: '出撃を解除',
-    message: 'この出撃を解除しますか？',
+    title: 'レイドを解除',
+    message: 'このレイドを解除しますか？',
     confirmLabel: '解除する',
     cancelLabel: 'キャンセル',
     danger: true,
@@ -1029,7 +1083,7 @@ async function removeSortieById(sortieId) {
     document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
   }
   render();
-  showToast('出撃を解除しました');
+  showToast('レイドを解除しました');
 
   if (boardReady) {
     noteLocalBoardChange();
@@ -1335,8 +1389,10 @@ function closeModal({ keepParty = false } = {}) {
   if (!keepParty) {
     partySortieId = null;
   }
-  // パーティ編集は閉じるときに共有ボードへ保存＆背面更新
+  // パーティ編集は閉じるときに空枠を掃除し、共有ボードへ保存＆背面更新
   if (closingParty) {
+    const s = editedSortieId ? state.sorties.find((x) => x.id === editedSortieId) : null;
+    if (s) compactEmptyParties(s, { keepTrailingEmpty: false });
     persist(editedSortieId ? { sortieId: editedSortieId } : {});
     render();
   }
@@ -1545,8 +1601,8 @@ function openPartyModal(sortieId) {
   modalEl.className = 'modal modal-party';
   modalEl.innerHTML = `
     <div class="party-modal-head">
-      <h3>出撃メンバー</h3>
-      <button type="button" class="btn btn-ghost" data-act="close">閉じる</button>
+      <h3>レイドメンバー</h3>
+      <button type="button" class="btn modal-close" data-act="close">閉じる</button>
     </div>
     <div class="party-summary">
       <div class="party-summary-title">${esc(sortie.objective || '（内容未設定）')}</div>
@@ -1554,13 +1610,13 @@ function openPartyModal(sortieId) {
       <div class="timing-tag-picker" data-timing-tags></div>
     </div>
     <p class="hint party-howto">
-      パーティをタップしてメンバーを追加・外しできます（各${PARTY_SIZE}人・2人でもOK）。PCはドラッグでも移動できます。
+      パーティをタップしてメンバーを選びます（各${PARTY_SIZE}人）。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。
     </p>
     <div class="party-modal-grid">
       <section class="party-pane">
         <div class="party-pane-head">
           <div class="party-pane-label">パーティ</div>
-          <button type="button" class="btn" data-add-party>+ 追加</button>
+          <button type="button" class="btn party-add-btn" data-add-party>+ 追加</button>
         </div>
         <div class="party-list party-list--modal" data-party></div>
       </section>
@@ -1577,7 +1633,7 @@ function openPartyModal(sortieId) {
     </div>
     <div class="modal-actions party-modal-actions">
       <button type="button" class="btn btn-primary" data-act="copy">Discord用コピー</button>
-      <button type="button" class="btn btn-danger" data-act="remove">出撃を解除</button>
+      <button type="button" class="btn btn-danger btn-danger-strong" data-act="remove">レイドを解除</button>
     </div>
     <div class="party-fill-sheet" data-fill-sheet hidden></div>
   `;
@@ -1614,9 +1670,9 @@ function openPartyModal(sortieId) {
     fillSelected = new Set();
     fillSheet.hidden = true;
     fillSheet.replaceChildren();
-    // 「+ 追加」だけして戻ったときなど、空パーティを残さない
+    // モーダル中は末尾の空枠（+ 追加）を残し、途中の空だけ詰める
     if (wasOpen) {
-      compactEmptyParties(getSortie());
+      compactEmptyParties(getSortie(), { keepTrailingEmpty: true });
       persist({ skipSync: true, sortieId });
       paintParties();
       updateMemberMarks();
@@ -1688,7 +1744,7 @@ function openPartyModal(sortieId) {
         <div class="party-fill-title">パーティ ${gi + 1}</div>
         <div class="hint">最大${PARTY_SIZE}人まで選んで確定（${selectedCount}/${PARTY_SIZE}）</div>
       </div>
-      <button type="button" class="btn btn-ghost" data-fill-close>戻る</button>
+      <button type="button" class="btn modal-close" data-fill-close>戻る</button>
     `;
     head.querySelector('[data-fill-close]').addEventListener('click', closeFillSheet);
 
@@ -1865,33 +1921,14 @@ function openPartyModal(sortieId) {
       const row = document.createElement('div');
       row.dataset.memberId = m.id;
       row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}`;
-      row.appendChild(avatarNode(m));
-      const avBtn = row.querySelector('.avatar, .avatar-fallback');
-      if (avBtn) {
-        avBtn.classList.add('avatar--editable');
-        avBtn.title = 'アイコンを変更';
-        avBtn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          await editMemberAvatarFromRoster(m.id);
-          if (!repaintPartyModal()) {
-            render();
-            openPartyModal(sortieId);
-          }
-        });
-      }
-      const name = document.createElement('span');
-      name.className = 'name';
-      name.textContent = m.name;
-      const mark = document.createElement('span');
-      mark.className = 'pick-mark';
-      mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
-      const iconEdit = document.createElement('button');
-      iconEdit.type = 'button';
-      iconEdit.className = 'member-pick-edit';
-      iconEdit.setAttribute('aria-label', `${m.name}のアイコンを変更`);
-      iconEdit.title = 'アイコンを変更';
-      iconEdit.textContent = 'アイコン';
-      iconEdit.addEventListener('click', async (e) => {
+
+      const avWrap = document.createElement('button');
+      avWrap.type = 'button';
+      avWrap.className = 'member-pick-avatar';
+      avWrap.title = 'アイコンを変更';
+      avWrap.setAttribute('aria-label', `${m.name}のアイコンを変更`);
+      avWrap.appendChild(avatarNode(m));
+      avWrap.addEventListener('click', async (e) => {
         e.stopPropagation();
         await editMemberAvatarFromRoster(m.id);
         if (!repaintPartyModal()) {
@@ -1899,13 +1936,35 @@ function openPartyModal(sortieId) {
           openPartyModal(sortieId);
         }
       });
-      const edit = document.createElement('button');
-      edit.type = 'button';
-      edit.className = 'member-pick-edit';
-      edit.setAttribute('aria-label', `${m.name}の名前を変更`);
-      edit.title = '名前を変更';
-      edit.textContent = '名前変更';
-      edit.addEventListener('click', async (e) => {
+
+      const main = document.createElement('button');
+      main.type = 'button';
+      main.className = 'member-pick-main';
+      main.title = partyIdx >= 0 ? 'タップでこのレイドから外す' : '追加したいパーティをタップしてください';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = m.name;
+      const mark = document.createElement('span');
+      mark.className = `pick-mark${partyIdx >= 0 ? ' is-placed' : ''}`;
+      mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
+      main.append(name, mark);
+      main.addEventListener('click', () => {
+        if (partyIdx >= 0) {
+          removeSortieMember(sortieId, m.id);
+          return;
+        }
+        showToast('追加したいパーティをタップしてください');
+      });
+
+      const more = document.createElement('div');
+      more.className = 'member-pick-more';
+      const rename = document.createElement('button');
+      rename.type = 'button';
+      rename.className = 'member-pick-icon-btn';
+      rename.setAttribute('aria-label', `${m.name}の名前を変更`);
+      rename.title = '名前を変更';
+      rename.textContent = '名前変更';
+      rename.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!(await renameMemberFromRoster(m.id))) return;
         if (!repaintPartyModal()) {
@@ -1915,7 +1974,7 @@ function openPartyModal(sortieId) {
       });
       const del = document.createElement('button');
       del.type = 'button';
-      del.className = 'member-pick-remove';
+      del.className = 'member-pick-icon-btn is-danger';
       del.setAttribute('aria-label', `${m.name}を名簿から削除`);
       del.title = '名簿から削除';
       del.textContent = '×';
@@ -1928,15 +1987,10 @@ function openPartyModal(sortieId) {
         }
         showToast(`${m.name} を名簿から削除しました`);
       });
-      row.append(name, mark, iconEdit, edit, del);
+      more.append(rename, del);
+
+      row.append(avWrap, main, more);
       bindMemberDrag(row, m.id);
-      row.addEventListener('click', () => {
-        if (partyIdx >= 0) {
-          removeSortieMember(sortieId, m.id);
-          return;
-        }
-        showToast('追加したいパーティをタップしてください');
-      });
       membersEl.appendChild(row);
     }
   };
@@ -1955,7 +2009,14 @@ function openPartyModal(sortieId) {
       const partyIdx = findMemberPartyIndex(live, id);
       row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}`;
       const mark = row.querySelector('.pick-mark');
-      if (mark) mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
+      if (mark) {
+        mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
+        mark.classList.toggle('is-placed', partyIdx >= 0);
+      }
+      const main = row.querySelector('.member-pick-main');
+      if (main) {
+        main.title = partyIdx >= 0 ? 'タップでこのレイドから外す' : '追加したいパーティをタップしてください';
+      }
     }
   };
 
@@ -1997,15 +2058,18 @@ function openPartyModal(sortieId) {
   });
 
   modalEl.querySelector('[data-add-party]').addEventListener('click', () => {
-    const res = addEmptyParty(getSortie());
+    const live = getSortie();
+    const before = ensureParties(live).length;
+    const res = addEmptyParty(live);
     persist({ skipSync: true, sortieId });
-    openPartyModal._pendingFill = res.partyIndex;
     if (!repaintPartyModal()) {
       openPartyModal(sortieId);
       return;
     }
-    openPartyModal._pendingFill = null;
     openFillSheet(res.partyIndex);
+    if (ensureParties(getSortie()).length > before) {
+      showToast(`パーティ${res.partyIndex + 1}を追加しました`);
+    }
   });
 
   modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
@@ -2156,10 +2220,110 @@ function iconSvg(kind) {
       return `<svg ${base}><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/></svg>`;
     case 'act':
       return `<svg ${base}><path d="M13 2 4 14h7l-1 8 10-14h-7l0-6Z" fill="currentColor"/></svg>`;
+    case 'more':
+      return `<svg ${base} aria-hidden="true"><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="19" r="1.6" fill="currentColor"/></svg>`;
+    case 'edit':
+      return `<svg ${base} aria-hidden="true"><path d="M4 20h4l10.5-10.5-4-4L4 16v4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m13.5 5.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
+    case 'trash':
+      return `<svg ${base} aria-hidden="true"><path d="M5 7h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M9 7V5h6v2" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 7l1 12h6l1-12" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`;
     case 'all':
     default:
       return `<svg ${base}><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><path d="M12 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7 12h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
   }
+}
+
+function closeAllSortieMenus(except = null) {
+  document.querySelectorAll('.sortie-row-menu').forEach((menu) => {
+    if (except && menu === except) return;
+    const toggle = menu.querySelector('.sortie-row-menu-toggle');
+    const panel = menu.querySelector('.sortie-row-menu-panel');
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    if (panel) panel.hidden = true;
+  });
+}
+
+function renderSortieRowMenu(sortie) {
+  const menu = document.createElement('div');
+  menu.className = 'sortie-row-menu';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'sortie-row-menu-toggle';
+  toggle.setAttribute('aria-haspopup', 'menu');
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-label', '操作メニュー');
+  toggle.title = '操作';
+  toggle.innerHTML = iconSvg('more');
+
+  const panel = document.createElement('div');
+  panel.className = 'sortie-row-menu-panel';
+  panel.setAttribute('role', 'menu');
+  panel.hidden = true;
+
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'sortie-row-menu-item';
+  editBtn.setAttribute('role', 'menuitem');
+  editBtn.innerHTML = `${iconSvg('edit')}<span>編集</span>`;
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAllSortieMenus();
+    openPartyModal(sortie.id);
+  });
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'sortie-row-menu-item is-danger';
+  removeBtn.setAttribute('role', 'menuitem');
+  removeBtn.innerHTML = `${iconSvg('trash')}<span>解除</span>`;
+  removeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAllSortieMenus();
+    removeSortieById(sortie.id);
+  });
+
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = panel.hidden;
+    closeAllSortieMenus(menu);
+    panel.hidden = !open;
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  panel.append(editBtn, removeBtn);
+  menu.append(toggle, panel);
+  return menu;
+}
+
+function renderLoadingSkeleton(kind) {
+  const wrap = document.createElement('div');
+  wrap.className = 'ui-skeleton-wrap';
+  wrap.setAttribute('aria-busy', 'true');
+  wrap.setAttribute('aria-label', '読み込み中');
+
+  if (kind === 'rail') {
+    const rail = document.createElement('div');
+    rail.className = 'ui-skeleton-rail';
+    for (let i = 0; i < 3; i++) {
+      const card = document.createElement('div');
+      card.className = 'ui-skeleton ui-skeleton-card';
+      rail.appendChild(card);
+    }
+    wrap.appendChild(rail);
+    return wrap;
+  }
+
+  for (let d = 0; d < 2; d++) {
+    const day = document.createElement('div');
+    day.className = 'ui-skeleton ui-skeleton-day';
+    wrap.appendChild(day);
+    for (let r = 0; r < 3; r++) {
+      const row = document.createElement('div');
+      row.className = 'ui-skeleton ui-skeleton-row';
+      wrap.appendChild(row);
+    }
+  }
+  return wrap;
 }
 
 function appendEventIcon(host, label, kind) {
@@ -2242,7 +2406,7 @@ function openTrialPrefsModal(trial) {
   modalEl.innerHTML = `
     <div class="party-modal-head">
       <h3>マップ・イベント</h3>
-      <button type="button" class="btn btn-ghost" data-act="close">閉じる</button>
+      <button type="button" class="btn modal-close" data-act="close">閉じる</button>
     </div>
     <div class="trial-prefs-hero">
       ${
@@ -2395,9 +2559,14 @@ function renderTrialCard(trial) {
   if (unset) {
     const empty = document.createElement('div');
     empty.className = 'trial-slot-empty';
-    empty.innerHTML =
-      'マップとイベントを選ぶと枠が表示されます<br /><button type="button" class="btn" data-setup>設定する</button>';
-    empty.querySelector('[data-setup]').addEventListener('click', openPrefs);
+    const msg = document.createElement('p');
+    msg.textContent = 'マップとイベントを選ぶと、予約できる時間枠が表示されます';
+    const setup = document.createElement('button');
+    setup.type = 'button';
+    setup.className = 'btn btn-primary trial-setup-cta';
+    setup.textContent = 'マップを設定';
+    setup.addEventListener('click', openPrefs);
+    empty.append(msg, setup);
     sched.appendChild(empty);
     card.append(imgw, body, sched);
     return card;
@@ -2406,8 +2575,6 @@ function renderTrialCard(trial) {
   const list = document.createElement('div');
   list.className = 'mp-time-list';
 
-  const now = Date.now();
-  const hourStart = now - (now % 3600000);
   let visible = slots.filter((slot) => slotMatchesTrialPrefs(slot, prefs));
   if (schedFilter === 'registered') {
     visible = visible.filter((slot) => isRegisteredSlot(slot, trial.id));
@@ -2416,11 +2583,19 @@ function renderTrialCard(trial) {
   if (!visible.length) {
     const empty = document.createElement('div');
     empty.className = 'trial-slot-empty';
-    empty.textContent = loading
-      ? '読み込み中…'
-      : schedFilter === 'registered'
-        ? '出撃登録がありません'
-        : 'この条件では表示できる枠がありません';
+    if (loading) {
+      empty.classList.add('is-skeleton');
+      for (let i = 0; i < 3; i++) {
+        const sk = document.createElement('div');
+        sk.className = 'ui-skeleton ui-skeleton-slot';
+        empty.appendChild(sk);
+      }
+    } else {
+      empty.textContent =
+        schedFilter === 'registered'
+          ? 'レイド登録がありません'
+          : 'この条件では表示できる枠がありません';
+    }
     sched.appendChild(empty);
   } else {
     for (const slot of visible.slice(0, 40)) {
@@ -2431,8 +2606,9 @@ function renderTrialCard(trial) {
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'mp-time-item';
-      if (slot.startMs === hourStart || remain.kind === 'live') row.classList.add('current');
+      if (remain.kind === 'live') row.classList.add('is-live');
       if (registered) row.classList.add('is-registered');
+      else row.classList.add('is-open');
 
       const row1 = document.createElement('div');
       row1.className = 'trial-sched-row1';
@@ -2510,7 +2686,13 @@ function renderTrialCard(trial) {
       }
       const cta = document.createElement('div');
       cta.className = 'slot-cta';
-      cta.textContent = registered ? 'メンバー編集' : 'この枠で出撃';
+      if (registered) {
+        cta.textContent = '編集';
+        cta.title = 'メンバーを編集';
+      } else {
+        cta.textContent = '予約する';
+        cta.title = 'この時間枠でレイドを予約';
+      }
       foot.appendChild(cta);
 
       row.append(row1, row2, foot);
@@ -2524,26 +2706,31 @@ function renderTrialCard(trial) {
   return card;
 }
 
-/** 出撃のみ：メンバー絞り込みピッカー */
+/** 出撃のみ：メンバー絞り込みピッカー（選択した時点で反映） */
 function openMemberFilterModal() {
-  const draft = new Set(memberFilterIds);
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop modal-backdrop--confirm';
   const modalEl = document.createElement('div');
   modalEl.className = 'modal modal-member-filter';
 
+  const applyLive = () => {
+    saveMemberFilterIds(memberFilterIds);
+    render();
+  };
+
   const paint = () => {
+    const listEl = modalEl.querySelector('[data-list]');
+    const keepScroll = listEl?.scrollTop || 0;
     const sorted = [...state.members].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
     modalEl.innerHTML = `
       <div class="party-modal-head">
         <h3>メンバーで絞り込み</h3>
-        <button type="button" class="btn btn-ghost" data-act="cancel">閉じる</button>
+        <button type="button" class="btn modal-close" data-act="close">閉じる</button>
       </div>
-      <p class="hint">選んだ人が全員参加している出撃だけ表示します（${draft.size}人選択中）</p>
+      <p class="hint">選んだ人が全員参加しているレイドだけ表示します（${memberFilterIds.size}人選択中）</p>
       <div class="member-filter-pick-list" data-list></div>
       <div class="modal-actions">
-        <button type="button" class="btn" data-act="clear">クリア</button>
-        <button type="button" class="btn btn-primary" data-act="apply">適用</button>
+        <button type="button" class="btn" data-act="clear"${memberFilterIds.size ? '' : ' disabled'}>クリア</button>
       </div>
     `;
     const list = modalEl.querySelector('[data-list]');
@@ -2551,7 +2738,7 @@ function openMemberFilterModal() {
       list.innerHTML = '<p class="hint">名簿が空です</p>';
     } else {
       for (const m of sorted) {
-        const on = draft.has(m.id);
+        const on = memberFilterIds.has(m.id);
         const row = document.createElement('button');
         row.type = 'button';
         row.className = `member-pick${on ? ' is-on' : ''}`;
@@ -2566,23 +2753,21 @@ function openMemberFilterModal() {
         name.textContent = m.name;
         row.appendChild(name);
         row.addEventListener('click', () => {
-          if (draft.has(m.id)) draft.delete(m.id);
-          else draft.add(m.id);
+          if (memberFilterIds.has(m.id)) memberFilterIds.delete(m.id);
+          else memberFilterIds.add(m.id);
+          applyLive();
           paint();
         });
         list.appendChild(row);
       }
     }
-    modalEl.querySelector('[data-act="cancel"]').addEventListener('click', () => backdrop.remove());
+    list.scrollTop = keepScroll;
+    modalEl.querySelector('[data-act="close"]').addEventListener('click', () => backdrop.remove());
     modalEl.querySelector('[data-act="clear"]').addEventListener('click', () => {
-      draft.clear();
+      if (!memberFilterIds.size) return;
+      memberFilterIds = new Set();
+      applyLive();
       paint();
-    });
-    modalEl.querySelector('[data-act="apply"]').addEventListener('click', () => {
-      memberFilterIds = new Set(draft);
-      saveMemberFilterIds(memberFilterIds);
-      backdrop.remove();
-      render();
     });
   };
 
@@ -2600,8 +2785,9 @@ function memberFilterSummaryText() {
     .filter((m) => memberFilterIds.has(m.id))
     .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
     .map((m) => m.name);
-  if (names.length <= 2) return names.join('・');
-  return `${names.slice(0, 2).join('・')} 他${names.length - 2}人`;
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return names.join('・');
+  return `${names[0]} 他${names.length - 1}人`;
 }
 
 function sortieMemberFingerprint(sortie) {
@@ -2688,6 +2874,8 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     }
   });
 
+  const timingTags = ensureTimingTags(sortie);
+
   if (!hideTime) {
     const timeCol = document.createElement('div');
     timeCol.className = 'sortie-time-col';
@@ -2698,7 +2886,7 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     cd.className = 'sortie-time-cd';
     bindCountdownEl(cd, startMs, endMs, 'is-live');
     timeCol.append(range, cd);
-    if (ensureTimingTags(sortie).length) {
+    if (timingTags.length) {
       const timing = document.createElement('div');
       timing.className = 'sortie-time-timing-tags';
       appendTimingTagEls(timing, sortie);
@@ -2710,36 +2898,48 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
   const body = document.createElement('div');
   body.className = 'sortie-time-body';
 
-  const titleRow = document.createElement('div');
-  titleRow.className = 'sortie-time-title-row';
-  if (sortie.regionSlug) titleRow.appendChild(createSrvAbbr(sortie.regionSlug));
+  const head = document.createElement('div');
+  head.className = 'sortie-time-head';
+
+  const titleLine = document.createElement('div');
+  titleLine.className = 'sortie-time-title-line';
+  if (sortie.regionSlug) titleLine.appendChild(createSrvAbbr(sortie.regionSlug));
   else if (sortie.server) {
     const srv = document.createElement('span');
     srv.className = 'tag';
     srv.textContent = sortie.server;
-    titleRow.appendChild(srv);
+    titleLine.appendChild(srv);
   }
-  const title = document.createElement('div');
+  const title = document.createElement('span');
   title.className = 'sortie-time-title';
   title.textContent = sortie.objective || '（内容未設定）';
-  titleRow.appendChild(title);
+  titleLine.appendChild(title);
+  head.appendChild(titleLine);
 
-  const meta = document.createElement('div');
-  meta.className = 'sortie-time-meta';
-  if (sortie.event) {
-    const ev = document.createElement('span');
-    ev.className = 'trial-ev-line';
-    setEventNameWithIcon(ev, sortie.event, remain.kind === 'live' ? 'act' : eventType(sortie.event));
-    meta.appendChild(ev);
+  if (sortie.event || sortie.map) {
+    const metaLine = document.createElement('div');
+    metaLine.className = 'sortie-time-head-meta-line';
+    if (sortie.event) {
+      const ev = document.createElement('span');
+      ev.className = 'trial-ev-line sortie-time-head-meta';
+      setEventNameWithIcon(ev, sortie.event, remain.kind === 'live' ? 'act' : eventType(sortie.event));
+      metaLine.appendChild(ev);
+    }
+    if (sortie.map) {
+      const map = document.createElement('span');
+      map.className = 'tag sortie-time-head-meta';
+      map.textContent = sortie.map;
+      metaLine.appendChild(map);
+    }
+    head.appendChild(metaLine);
   }
-  if (sortie.map) {
-    const map = document.createElement('span');
-    map.className = 'tag';
-    map.textContent = sortie.map;
-    meta.appendChild(map);
+
+  if (hideTime && timingTags.length) {
+    const timing = document.createElement('div');
+    timing.className = 'sortie-time-timing-tags';
+    appendTimingTagEls(timing, sortie);
+    head.appendChild(timing);
   }
-  // 重複まとまり内（時刻列なし）ではタグをメタ横に出す
-  if (hideTime) appendTimingTagEls(meta, sortie);
 
   const parties = document.createElement('div');
   parties.className = 'sortie-time-parties';
@@ -2769,32 +2969,12 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     });
   }
 
-  // 重複まとまり内ではメンバーは見出しで共有表示
-  if (inOverlap) body.append(titleRow, meta);
-  else body.append(titleRow, meta, parties);
+  // 重複内も行ごとに時刻・参加者を出してまとまりを掴みやすくする
+  body.append(head, parties);
 
   const actions = document.createElement('div');
   actions.className = 'sortie-time-actions';
-
-  const editBtn = document.createElement('button');
-  editBtn.type = 'button';
-  editBtn.className = 'btn btn-primary sortie-time-edit';
-  editBtn.textContent = 'メンバー編集';
-  editBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openPartyModal(sortie.id);
-  });
-
-  const removeBtn = document.createElement('button');
-  removeBtn.type = 'button';
-  removeBtn.className = 'btn btn-danger sortie-time-remove';
-  removeBtn.textContent = '出撃解除';
-  removeBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    removeSortieById(sortie.id);
-  });
-
-  actions.append(editBtn, removeBtn);
+  actions.appendChild(renderSortieRowMenu(sortie));
   row.append(body, actions);
   row.addEventListener('click', () => openPartyModal(sortie.id));
   return row;
@@ -2813,6 +2993,9 @@ function renderOverlapCluster(groupItems) {
   const head = document.createElement('div');
   head.className = 'sortie-overlap-cluster-head';
 
+  const primary = document.createElement('div');
+  primary.className = 'sortie-overlap-cluster-primary';
+
   const time = document.createElement('div');
   time.className = 'sortie-overlap-cluster-time';
   time.innerHTML = `<span class="sortie-time-range"><span>${esc(start)}</span><span class="t-dash">-</span><span>${esc(
@@ -2825,19 +3008,21 @@ function renderOverlapCluster(groupItems) {
 
   const label = document.createElement('div');
   label.className = 'sortie-overlap-cluster-label';
-  label.textContent = `同じメンバーで重複 ×${groupItems.length}`;
+  label.textContent = `重複 ×${groupItems.length}`;
+
+  primary.append(time, label);
 
   const members = document.createElement('div');
   members.className = 'sortie-overlap-cluster-members';
   members.textContent = memberLine || '参加者なし';
   members.title = memberLine;
 
-  head.append(time, label, members);
+  head.append(primary, members);
 
   const list = document.createElement('div');
   list.className = 'sortie-overlap-cluster-list';
   for (const item of groupItems) {
-    list.appendChild(renderSortieTimelineRow(item, { hideTime: true, inOverlap: true }));
+    list.appendChild(renderSortieTimelineRow(item, { hideTime: false, inOverlap: true }));
   }
 
   cluster.append(head, list);
@@ -2866,7 +3051,7 @@ function renderRegisteredTimeline() {
   openBtn.type = 'button';
   openBtn.className = `btn member-filter-open${memberFilterIds.size ? ' is-on' : ''}`;
   openBtn.textContent = memberFilterSummaryText();
-  openBtn.title = 'メンバーで出撃を絞り込み';
+  openBtn.title = 'メンバーでレイドを絞り込み';
   openBtn.addEventListener('click', () => openMemberFilterModal());
   filterBar.appendChild(openBtn);
   if (memberFilterIds.size > 0) {
@@ -2899,9 +3084,36 @@ function renderRegisteredTimeline() {
   if (!list.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-sorties';
-    empty.textContent = memberFilterIds.size
-      ? '選択したメンバーが全員参加している出撃はありません'
-      : '出撃登録がありません。表示を「すべて」にして枠を選んでください。';
+    const msg = document.createElement('p');
+    msg.className = 'empty-sorties-msg';
+    const actions = document.createElement('div');
+    actions.className = 'empty-sorties-actions';
+    if (memberFilterIds.size) {
+      msg.textContent = '選択したメンバーが全員参加しているレイドはありません';
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'btn btn-primary';
+      clear.textContent = '絞り込みを解除';
+      clear.addEventListener('click', () => {
+        memberFilterIds = new Set();
+        saveMemberFilterIds(memberFilterIds);
+        render();
+      });
+      actions.appendChild(clear);
+    } else {
+      msg.textContent = 'まだレイド予約がありません';
+      const toAll = document.createElement('button');
+      toAll.type = 'button';
+      toAll.className = 'btn btn-primary';
+      toAll.textContent = 'スケジュールを見る';
+      toAll.addEventListener('click', () => {
+        schedFilter = 'all';
+        saveSchedFilter(schedFilter);
+        render();
+      });
+      actions.appendChild(toAll);
+    }
+    empty.append(msg, actions);
     root.appendChild(empty);
     return root;
   }
@@ -2957,88 +3169,57 @@ function render(opts = {}) {
 
   const top = document.createElement('header');
   top.className = 'topbar';
-  top.innerHTML = `
-    <div class="brand">
-      <h1>出撃備忘録</h1>
-      <p>出撃予定・メンバー名簿は共有されます</p>
-    </div>
-  `;
+
+  const brand = document.createElement('div');
+  brand.className = 'brand';
+  const title = document.createElement('h1');
+  title.textContent = 'レイド予約';
+  brand.appendChild(title);
+  const sub = document.createElement('p');
+  sub.textContent = 'レイド予定は共有されます';
+  brand.appendChild(sub);
+  top.appendChild(brand);
+
   const actions = document.createElement('div');
   actions.className = 'top-actions';
 
   const weekFilter = document.createElement('div');
-  weekFilter.className = 'week-filters';
+  weekFilter.className = 'seg';
   weekFilter.setAttribute('role', 'group');
   weekFilter.setAttribute('aria-label', '週の切り替え');
+  const weekDisabled = schedFilter === 'registered';
   for (const opt of [
     { id: 'current', label: '今週' },
     { id: 'next', label: '来週' },
   ]) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `chip-btn${weekMode === opt.id ? ' is-on' : ''}`;
+    btn.className = `seg-btn${weekMode === opt.id ? ' is-on' : ''}`;
     btn.textContent = opt.label;
-    btn.disabled = schedFilter === 'registered';
-    btn.title = schedFilter === 'registered' ? '出撃のみ表示中は使えません' : '';
+    btn.disabled = weekDisabled;
+    btn.setAttribute('aria-pressed', weekMode === opt.id ? 'true' : 'false');
+    btn.title = weekDisabled ? 'レイドのみ表示中は使えません' : '';
     btn.addEventListener('click', () => setWeekMode(opt.id));
     weekFilter.appendChild(btn);
   }
-
-  const count = document.createElement('span');
-  count.className = 'sortie-count';
-  count.textContent = `出撃 ${state.sorties.length}`;
-  count.title = '終了した出撃は自動で消えます';
-  const refresh = document.createElement('button');
-  refresh.type = 'button';
-  refresh.className = 'btn';
-  refresh.textContent = loading ? '取得中…' : '再取得';
-  refresh.disabled = loading;
-  refresh.addEventListener('click', () => loadSchedule());
-  actions.append(weekFilter, count, refresh);
-  top.appendChild(actions);
-
-  const toolbar = document.createElement('div');
-  toolbar.className = 'schedule-toolbar';
-
-  const filters = document.createElement('div');
-  filters.className = 'region-filters';
-  const label = document.createElement('span');
-  label.className = 'region-filters-label';
-  label.textContent = 'サーバー';
-  filters.appendChild(label);
-  for (const r of SERVER_REGIONS) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = `srv-pick-btn${selectedRegions.includes(r.slug) ? ' is-active' : ''}`;
-    btn.dataset.serverRegion = r.slug;
-    btn.title = `${r.label} (${r.abbr})`;
-    btn.innerHTML = `<span class="srv-pick-full">${esc(r.label)}</span><span class="srv-pick-short">${esc(r.abbr)}</span>`;
-    btn.addEventListener('click', () => {
-      if (selectedRegions.includes(r.slug)) {
-        if (selectedRegions.length === 1) return;
-        selectedRegions = selectedRegions.filter((x) => x !== r.slug);
-      } else {
-        selectedRegions = [...selectedRegions, r.slug];
-      }
-      loadSchedule();
-    });
-    filters.appendChild(btn);
-  }
+  if (weekDisabled) weekFilter.classList.add('is-disabled');
+  actions.appendChild(weekFilter);
 
   const viewFilter = document.createElement('div');
-  viewFilter.className = 'sched-view-filters';
-  const viewLabel = document.createElement('span');
-  viewLabel.className = 'region-filters-label';
-  viewLabel.textContent = '表示';
-  viewFilter.appendChild(viewLabel);
+  viewFilter.className = 'seg';
+  viewFilter.setAttribute('role', 'group');
+  viewFilter.setAttribute('aria-label', '表示切替');
   for (const opt of [
     { id: 'all', label: 'すべて' },
-    { id: 'registered', label: '出撃のみ' },
+    { id: 'registered', label: `レイド · ${state.sorties.length}` },
   ]) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `chip-btn${schedFilter === opt.id ? ' is-on' : ''}`;
+    btn.className = `seg-btn${schedFilter === opt.id ? ' is-on' : ''}`;
     btn.textContent = opt.label;
+    btn.setAttribute('aria-pressed', schedFilter === opt.id ? 'true' : 'false');
+    btn.title =
+      opt.id === 'registered' ? '登録済みのレイドだけ表示' : 'スケジュール一覧を表示';
     btn.addEventListener('click', () => {
       schedFilter = opt.id;
       saveSchedFilter(schedFilter);
@@ -3047,48 +3228,100 @@ function render(opts = {}) {
     viewFilter.appendChild(btn);
   }
 
-  toolbar.append(viewFilter);
-  if (schedFilter !== 'registered') {
-    toolbar.prepend(filters);
-  }
+  actions.appendChild(viewFilter);
+  top.appendChild(actions);
 
-  const hint = document.createElement('p');
-  hint.className = 'hint schedule-hint';
-  hint.textContent =
-    schedFilter === 'registered'
-      ? '「メンバーで絞り込み」から参加者を選べます。行をタップでメンバー編集。'
-      : weekMode === 'next'
-        ? '来週のトライアルです。マップ・イベントを選び、公開済みの時間枠があればメンバー登録できます。'
-        : 'カード上部をタップしてマップ・イベントを選び、時間枠でメンバー登録。出撃予定は全員で共有されます。';
+  const toolbar = document.createElement('div');
+  toolbar.className = 'schedule-toolbar';
+
+  if (schedFilter !== 'registered') {
+    const filters = document.createElement('div');
+    filters.className = 'region-filters';
+    const label = document.createElement('span');
+    label.className = 'region-filters-label';
+    label.textContent = 'サーバー';
+    filters.appendChild(label);
+    for (const r of SERVER_REGIONS) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `srv-pick-btn${selectedRegions.includes(r.slug) ? ' is-active' : ''}`;
+      btn.dataset.serverRegion = r.slug;
+      btn.title = `${r.label} (${r.abbr})`;
+      btn.innerHTML = `<span class="srv-pick-full">${esc(r.label)}</span><span class="srv-pick-short">${esc(r.abbr)}</span>`;
+      btn.addEventListener('click', () => {
+        if (selectedRegions.includes(r.slug)) {
+          if (selectedRegions.length === 1) return;
+          selectedRegions = selectedRegions.filter((x) => x !== r.slug);
+        } else {
+          selectedRegions = [...selectedRegions, r.slug];
+        }
+        loadSchedule();
+      });
+      filters.appendChild(btn);
+    }
+    toolbar.appendChild(filters);
+  }
 
   const trials = visibleTrials();
   const main = document.createElement('div');
   if (schedFilter === 'registered') {
     main.className = 'sortie-timeline-wrap';
     if (loading && !state.sorties.length && !trialsCurrent.length && !trialsNext.length) {
-      main.innerHTML = '<div class="empty-sorties">スケジュールを取得中…</div>';
+      main.appendChild(renderLoadingSkeleton('timeline'));
     } else if (loadError && !state.sorties.length) {
-      main.innerHTML = `<div class="empty-sorties">${esc(loadError)}</div>`;
+      main.innerHTML = `<div class="empty-sorties"><p class="empty-sorties-msg">${esc(loadError)}</p></div>`;
     } else {
       main.appendChild(renderRegisteredTimeline());
     }
   } else {
-    main.className = 'trial-rail';
     if (loading && !trialsCurrent.length && !trialsNext.length) {
-      main.innerHTML = '<div class="empty-sorties">スケジュールを取得中…</div>';
+      main.className = 'sortie-timeline-wrap';
+      main.appendChild(renderLoadingSkeleton('rail'));
     } else if (loadError) {
-      main.innerHTML = `<div class="empty-sorties">${esc(loadError)}</div>`;
+      main.className = 'trial-rail';
+      main.innerHTML = `<div class="empty-sorties"><p class="empty-sorties-msg">${esc(loadError)}</p></div>`;
     } else if (!trials.length) {
-      main.innerHTML =
-        weekMode === 'next'
-          ? '<div class="empty-sorties">来週のトライアルはまだ公開されていません</div>'
-          : '<div class="empty-sorties">今週のアクティブなトライアルがありません</div>';
+      main.className = 'trial-rail';
+      const empty = document.createElement('div');
+      empty.className = 'empty-sorties';
+      const msg = document.createElement('p');
+      msg.className = 'empty-sorties-msg';
+      const actions = document.createElement('div');
+      actions.className = 'empty-sorties-actions';
+      if (weekMode === 'next') {
+        msg.textContent = '来週のトライアルはまだ公開されていません';
+        const toCurrent = document.createElement('button');
+        toCurrent.type = 'button';
+        toCurrent.className = 'btn btn-primary';
+        toCurrent.textContent = '今週を見る';
+        toCurrent.addEventListener('click', () => setWeekMode('current'));
+        actions.appendChild(toCurrent);
+      } else {
+        msg.textContent = '今週のアクティブなトライアルがありません';
+        const toNext = document.createElement('button');
+        toNext.type = 'button';
+        toNext.className = 'btn';
+        toNext.textContent = '来週を見る';
+        toNext.addEventListener('click', () => setWeekMode('next'));
+        actions.appendChild(toNext);
+      }
+      empty.append(msg, actions);
+      main.appendChild(empty);
     } else {
-      trials.forEach((t) => main.appendChild(renderTrialCard(t)));
+      main.className = 'trial-rail';
+      trials.forEach((t, i) => {
+        const card = renderTrialCard(t);
+        card.style.setProperty('--card-i', String(Math.min(i, 8)));
+        main.appendChild(card);
+      });
     }
   }
 
-  app.append(top, toolbar, hint, main);
+  if (toolbar.childNodes.length) {
+    app.append(top, toolbar, main);
+  } else {
+    app.append(top, main);
+  }
   window.scrollTo(0, scrollY);
   const nextRail = app.querySelector('.trial-rail');
   if (nextRail) {
@@ -3151,3 +3384,11 @@ clockTimer = setInterval(() => {
   if (keep && state.sorties.some((s) => s.id === keep)) openPartyModal(keep);
 }, 30000);
 tickCountdowns();
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest?.('.sortie-row-menu')) return;
+  closeAllSortieMenus();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeAllSortieMenus();
+});
