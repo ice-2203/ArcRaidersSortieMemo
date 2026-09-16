@@ -152,7 +152,12 @@ let boardReady = false;
 let boardError = '';
 
 function persist(opts = {}) {
-  for (const s of state.sorties) refreshSortieRoster(s);
+  if (opts.sortieId) {
+    const s = state.sorties.find((x) => x.id === opts.sortieId);
+    if (s) refreshSortieRoster(s);
+  } else {
+    for (const s of state.sorties) refreshSortieRoster(s);
+  }
   saveState(state);
   if (!opts.skipSync && boardReady) queueBoardPush();
 }
@@ -202,7 +207,8 @@ async function pullBoard({ migrateLocal = false } = {}) {
 function startBoardPolling() {
   clearInterval(boardPullTimer);
   boardPullTimer = setInterval(() => {
-    if (document.hidden || boardSyncing) return;
+    // パーティ編集中は通信・再描画しない（入れ替えが重くなる）
+    if (document.hidden || boardSyncing || (modal && partySortieId)) return;
     pullBoard()
       .then(() => refreshUi())
       .catch((e) => {
@@ -210,7 +216,7 @@ function startBoardPolling() {
       });
   }, 20000);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
+    if (!document.hidden && !(modal && partySortieId)) {
       pullBoard()
         .then(() => refreshUi())
         .catch(() => {});
@@ -416,6 +422,7 @@ async function copyText(text) {
 
 function closeModal({ keepParty = false } = {}) {
   const closingParty = Boolean(partySortieId) && !keepParty;
+  const editedSortieId = closingParty ? partySortieId : null;
   modal = null;
   openPartyModal._repaint = null;
   document.querySelector('.modal-backdrop')?.remove();
@@ -423,38 +430,17 @@ function closeModal({ keepParty = false } = {}) {
     partySortieId = null;
     openPartyModal._heldMemberId = null;
   }
-  // パーティ編集の結果を背面に反映（モーダル中は描き直していないため）
-  if (closingParty) render();
+  // パーティ編集はモーダル中スキップした同期・背面更新を閉じるときにまとめて行う
+  if (closingParty) {
+    persist(editedSortieId ? { sortieId: editedSortieId } : {});
+    render();
+  }
 }
 
 function openModal(node) {
   closeModal({ keepParty: true });
   modal = node;
   document.body.appendChild(node);
-}
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('read failed'));
-    reader.readAsDataURL(file);
-  });
-}
-
-async function filesToMembers(files) {
-  const images = [...files].filter((f) => f.type.startsWith('image/'));
-  for (const file of images) {
-    const dataUrl = await readFileAsDataUrl(file);
-    const base = file.name.replace(/\.[^.]+$/, '').trim() || 'メンバー';
-    const member = createMember({ name: base, avatarDataUrl: dataUrl });
-    if (member) state.members.push(member);
-  }
-  if (images.length) {
-    persist();
-    showToast(`${images.length}人を登録しました`);
-    if (!repaintPartyModal()) refreshUi();
-  }
 }
 
 async function loadSchedule() {
@@ -495,107 +481,10 @@ function setWeekMode(mode) {
   render();
 }
 
-function openDiscordImportModal() {
-  const backdrop = document.createElement('div');
-  backdrop.className = 'modal-backdrop';
-  backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) {
-      const keep = partySortieId;
-      closeModal({ keepParty: true });
-      if (keep) openPartyModal(keep);
-    }
-  });
-  const modalEl = document.createElement('div');
-  modalEl.className = 'modal';
-  modalEl.innerHTML = `
-    <h3>Discordメンバーを取り込む</h3>
-    <p class="hint">Bot 設定があるときだけ使えます。未設定なら画像ドロップで登録してください。</p>
-    <div class="discord-picker" data-list>読み込み中…</div>
-    <div class="modal-actions">
-      <button type="button" class="btn btn-primary" data-act="add" disabled>選択を登録</button>
-      <button type="button" class="btn btn-ghost" data-act="cancel">閉じる</button>
-    </div>
-  `;
-  backdrop.appendChild(modalEl);
-  openModal(backdrop);
-  const listEl = modalEl.querySelector('[data-list]');
-  const addBtn = modalEl.querySelector('[data-act="add"]');
-  modalEl.querySelector('[data-act="cancel"]').addEventListener('click', () => {
-    const keep = partySortieId;
-    closeModal({ keepParty: true });
-    if (keep) openPartyModal(keep);
-  });
-  const selected = new Set();
-
-  (async () => {
-    try {
-      const res = await fetch('/api/discord-members');
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error || res.statusText);
-      const members = Array.isArray(json.members) ? json.members : [];
-      if (!members.length) {
-        listEl.textContent = 'メンバーが見つかりませんでした';
-        return;
-      }
-      listEl.replaceChildren();
-      for (const m of members) {
-        const already = state.members.some((x) => x.discordId === m.discordId);
-        const row = document.createElement('button');
-        row.type = 'button';
-        row.className = 'discord-row';
-        if (already) row.style.opacity = '0.45';
-        const img = document.createElement('img');
-        img.className = 'avatar';
-        img.src = m.avatarUrl;
-        img.alt = '';
-        img.referrerPolicy = 'no-referrer';
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.innerHTML = `<strong>${esc(m.name)}</strong><small>${esc(m.username || '')}${
-          already ? ' · 登録済み' : ''
-        }</small>`;
-        row.append(img, meta);
-        row.addEventListener('click', () => {
-          if (already) return;
-          if (selected.has(m.discordId)) selected.delete(m.discordId);
-          else selected.add(m.discordId);
-          row.classList.toggle('is-on', selected.has(m.discordId));
-          addBtn.disabled = selected.size === 0;
-        });
-        listEl.appendChild(row);
-      }
-      addBtn.addEventListener('click', () => {
-        let n = 0;
-        for (const m of members) {
-          if (!selected.has(m.discordId)) continue;
-          if (state.members.some((x) => x.discordId === m.discordId)) continue;
-          const member = createMember({
-            name: m.name,
-            avatarUrl: m.avatarUrl,
-            discordId: m.discordId,
-          });
-          if (member) {
-            state.members.push(member);
-            n += 1;
-          }
-        }
-        persist();
-        const keep = partySortieId;
-        closeModal({ keepParty: true });
-        showToast(`${n}人を登録しました`);
-        render();
-        if (keep) openPartyModal(keep);
-      });
-    } catch (e) {
-      listEl.textContent = String(e.message || e);
-    }
-  })();
-}
-
 function refreshUi() {
-  // モーダル表示中に丸ごと描画し直すと「名前だけ追加」などの入力が消える
-  if (modal && partySortieId) {
-    if (!state.sorties.some((s) => s.id === partySortieId)) {
+  // モーダル表示中に丸ごと描画し直すと入力や横スクロール位置が消える
+  if (modal) {
+    if (partySortieId && !state.sorties.some((s) => s.id === partySortieId)) {
       closeModal();
       render();
     }
@@ -609,15 +498,14 @@ function refreshUi() {
 }
 
 /** 出撃メンバーモーダルが開いていれば中身だけ描き直し（入力欄を潰さない） */
-function repaintPartyModal() {
+function repaintPartyModal(opts = {}) {
   if (!modal || !partySortieId) return false;
   if (typeof openPartyModal._repaint !== 'function') return false;
   if (!state.sorties.some((s) => s.id === partySortieId)) {
     closeModal();
-    render();
     return true;
   }
-  openPartyModal._repaint();
+  openPartyModal._repaint(opts);
   return true;
 }
 
@@ -625,8 +513,8 @@ function removeSortieMember(sortieId, memberId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   removeMemberFromParties(sortie, memberId);
-  persist();
-  if (!repaintPartyModal()) {
+  persist({ skipSync: true, sortieId });
+  if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
   }
@@ -640,8 +528,8 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
   if (current === partyIndex) {
     if (toggleIfSame) {
       removeMemberFromParties(sortie, memberId);
-      persist();
-      if (!repaintPartyModal()) {
+      persist({ skipSync: true, sortieId });
+      if (!repaintPartyModal({ light: true })) {
         render();
         openPartyModal(sortieId);
       }
@@ -658,8 +546,8 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     showToast(`パーティ${partyIndex + 1}は満員です（最大${PARTY_SIZE}人）`);
     return;
   }
-  persist();
-  if (!repaintPartyModal()) {
+  persist({ skipSync: true, sortieId });
+  if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
   }
@@ -724,11 +612,9 @@ function openPartyModal(sortieId) {
       <section class="party-pane">
         <div class="party-pane-head">
           <div class="party-pane-label">メンバー</div>
-          <button type="button" class="btn" data-discord>Discord</button>
         </div>
-        <div class="member-dropzone" data-drop>画像ドロップでメンバー追加<br /><span class="hint">ファイル名が初期名</span></div>
         <div class="member-add-row">
-          <input data-name placeholder="名前だけ追加" />
+          <input data-name placeholder="名前を追加" />
           <button type="button" class="btn" data-add>追加</button>
         </div>
         <div class="member-pick-list" data-members></div>
@@ -867,13 +753,13 @@ function openPartyModal(sortieId) {
               heldMemberId = null;
               openPartyModal._heldMemberId = null;
               paintParties();
-              paintMembers();
+              updateMemberMarks();
               return;
             }
             heldMemberId = m.id;
             openPartyModal._heldMemberId = m.id;
             paintParties();
-            paintMembers();
+            updateMemberMarks();
             showToast(`${m.name} を選択中 — 入れたいパーティをタップ`);
           });
           chips.appendChild(chip);
@@ -907,6 +793,7 @@ function openPartyModal(sortieId) {
       const held = heldMemberId === m.id;
       const row = document.createElement('button');
       row.type = 'button';
+      row.dataset.memberId = m.id;
       row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}${
         onTarget ? ' is-target' : ''
       }${held ? ' is-held' : ''}`;
@@ -928,7 +815,7 @@ function openPartyModal(sortieId) {
           heldMemberId = m.id;
           openPartyModal._heldMemberId = m.id;
           paintParties();
-          paintMembers();
+          updateMemberMarks();
           showToast(`${m.name} を選択中 — 入れたいパーティをタップ`);
           return;
         }
@@ -938,13 +825,38 @@ function openPartyModal(sortieId) {
     }
   };
 
+  /** メンバー行は残して印だけ更新（入れ替え連打を軽くする） */
+  const updateMemberMarks = () => {
+    const live = getSortie();
+    const membersEl = modalEl.querySelector('[data-members]');
+    const rows = membersEl.querySelectorAll('[data-member-id]');
+    if (!rows.length) {
+      paintMembers();
+      return;
+    }
+    for (const row of rows) {
+      const id = row.getAttribute('data-member-id');
+      const partyIdx = findMemberPartyIndex(live, id);
+      const onTarget = partyIdx === targetParty;
+      const held = heldMemberId === id;
+      row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}${
+        onTarget ? ' is-target' : ''
+      }${held ? ' is-held' : ''}`;
+      const mark = row.querySelector('.pick-mark');
+      if (!mark) continue;
+      if (held) mark.textContent = '選択中';
+      else if (partyIdx < 0) mark.textContent = `P${targetParty + 1}へ`;
+      else if (onTarget) mark.textContent = '外す';
+      else mark.textContent = `P${partyIdx + 1}→P${targetParty + 1}`;
+    }
+  };
+
   paintParties();
   paintMembers();
 
-  openPartyModal._repaint = () => {
+  openPartyModal._repaint = (opts = {}) => {
     if (!getSortie()) {
       closeModal();
-      render();
       return;
     }
     targetParty = Math.min(
@@ -954,20 +866,9 @@ function openPartyModal(sortieId) {
     openPartyModal._targetParty = targetParty;
     heldMemberId = openPartyModal._heldMemberId || null;
     paintParties();
-    paintMembers();
+    if (opts.light) updateMemberMarks();
+    else paintMembers();
   };
-
-  const drop = modalEl.querySelector('[data-drop]');
-  drop.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    drop.classList.add('is-drag');
-  });
-  drop.addEventListener('dragleave', () => drop.classList.remove('is-drag'));
-  drop.addEventListener('drop', async (e) => {
-    e.preventDefault();
-    drop.classList.remove('is-drag');
-    await filesToMembers(e.dataTransfer.files || []);
-  });
 
   const nameInput = modalEl.querySelector('[data-name]');
   const doAdd = () => {
@@ -977,7 +878,7 @@ function openPartyModal(sortieId) {
     state.members.push(member);
     const res = addMemberToParty(live, member.id, targetParty);
     nameInput.value = '';
-    persist();
+    persist({ skipSync: true, sortieId });
     if (!res.ok) {
       showToast(`パーティ${targetParty + 1}は満員です。別パーティを選んでください`);
     } else {
@@ -996,7 +897,7 @@ function openPartyModal(sortieId) {
 
   modalEl.querySelector('[data-add-party]').addEventListener('click', () => {
     const res = addEmptyParty(getSortie());
-    persist();
+    persist({ skipSync: true, sortieId });
     openPartyModal._targetParty = res.partyIndex;
     targetParty = res.partyIndex;
     if (!repaintPartyModal()) {
@@ -1004,9 +905,6 @@ function openPartyModal(sortieId) {
     }
   });
 
-  modalEl.querySelector('[data-discord]').addEventListener('click', () => {
-    openDiscordImportModal();
-  });
   modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
   modalEl.querySelector('[data-act="copy"]').addEventListener('click', () => {
     copyText(discordCopyText(getSortie()));
@@ -1225,8 +1123,14 @@ function openTrialPrefsModal(trial) {
 
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
+  const finish = () => {
+    saveTrialPrefs(trial.id, selMaps, selEvents, mapKeys, eventKeys);
+    closeModal();
+    render({ focusTrialId: trial.id });
+  };
+
   backdrop.addEventListener('click', (e) => {
-    if (e.target === backdrop) closeModal();
+    if (e.target === backdrop) finish();
   });
 
   const modalEl = document.createElement('div');
@@ -1325,12 +1229,8 @@ function openTrialPrefsModal(trial) {
 
   paint();
 
-  modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
-  modalEl.querySelector('[data-act="close-save"]').addEventListener('click', () => {
-    saveTrialPrefs(trial.id, selMaps, selEvents, mapKeys, eventKeys);
-    closeModal();
-    render();
-  });
+  modalEl.querySelector('[data-act="close"]').addEventListener('click', finish);
+  modalEl.querySelector('[data-act="close-save"]').addEventListener('click', finish);
   modalEl.querySelector('[data-act="reset"]').addEventListener('click', () => {
     selMaps = new Set();
     selEvents = new Set();
@@ -1345,6 +1245,7 @@ function openTrialPrefsModal(trial) {
 function renderTrialCard(trial) {
   const card = document.createElement('article');
   card.className = 'trial-card';
+  card.dataset.trialId = trial.id;
   const prefs = getTrialPrefs(trial.id);
   const unset = prefsIsUnset(prefs);
 
@@ -1684,9 +1585,11 @@ function renderRegisteredTimeline() {
   return root;
 }
 
-function render() {
+function render(opts = {}) {
   pruneExpiredSorties();
   const scrollY = window.scrollY;
+  const prevRail = app.querySelector('.trial-rail');
+  const railScrollLeft = prevRail ? prevRail.scrollLeft : 0;
   app.replaceChildren();
 
   const top = document.createElement('header');
@@ -1823,6 +1726,24 @@ function render() {
 
   app.append(top, toolbar, hint, main);
   window.scrollTo(0, scrollY);
+  const nextRail = app.querySelector('.trial-rail');
+  if (nextRail) {
+    const restoreLeft = () => {
+      if (opts.focusTrialId) {
+        const focusCard = nextRail.querySelector(
+          `[data-trial-id="${CSS.escape(String(opts.focusTrialId))}"]`
+        );
+        if (focusCard) {
+          nextRail.scrollLeft = Math.max(0, focusCard.offsetLeft);
+          return;
+        }
+      }
+      nextRail.scrollLeft = railScrollLeft;
+    };
+    restoreLeft();
+    // scroll-snap やレイアウト確定後に先頭へ戻る端末向けに再適用
+    requestAnimationFrame(restoreLeft);
+  }
 }
 
 render();
@@ -1842,8 +1763,8 @@ render();
 clearInterval(clockTimer);
 clockTimer = setInterval(() => {
   pruneExpiredSorties();
-  if (modal && partySortieId) {
-    if (!state.sorties.some((s) => s.id === partySortieId)) {
+  if (modal) {
+    if (partySortieId && !state.sorties.some((s) => s.id === partySortieId)) {
       closeModal();
       render();
     }

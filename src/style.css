@@ -1275,37 +1275,30 @@ input {
   }
 }
 
-.member-dropzone {
-  border: 1px dashed var(--border2);
-  border-radius: 10px;
-  padding: 14px 12px;
-  text-align: center;
-  color: var(--text3);
-  font-size: 0.82rem;
-  line-height: 1.45;
-  background: rgba(0, 0, 0, 0.18);
-  margin-bottom: 10px;
-}
-
-.member-dropzone.is-drag {
-  border-color: var(--accent);
-  background: rgba(34, 184, 255, 0.08);
-  color: var(--text);
-}
-
 .member-add-row {
   display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
   gap: 6px;
   margin-bottom: 10px;
+  min-width: 0;
 }
 
 .member-add-row input {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  width: 0; /* flex 内で縮み、ボタンを押し出さない */
   border: 1px solid var(--border2);
   border-radius: 8px;
   background: var(--bg3);
   padding: 7px 9px;
   outline: none;
+  font-size: 16px; /* iOS フォーカス時のズーム防止 */
+}
+
+.member-add-row .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .member-list {
@@ -1412,49 +1405,6 @@ input {
   font-size: 0.84rem;
   z-index: 80;
   box-shadow: var(--shadow);
-}
-
-.discord-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 360px;
-  overflow: auto;
-  margin-top: 8px;
-}
-
-.discord-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  cursor: pointer;
-  background: transparent;
-  width: 100%;
-  text-align: left;
-}
-
-.discord-row:hover,
-.discord-row.is-on {
-  border-color: var(--accent);
-  background: rgba(34, 184, 255, 0.08);
-}
-
-.discord-row .meta {
-  flex: 1;
-  min-width: 0;
-}
-
-.discord-row .meta strong {
-  display: block;
-  font-size: 0.86rem;
-}
-
-.discord-row .meta small {
-  color: var(--text3);
-  font-size: 0.72rem;
 }
 
 .modal-party {
