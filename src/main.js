@@ -754,6 +754,8 @@ function openPartyModal(sortieId) {
     meta.appendChild(map);
   }
 
+  const getSortie = () => state.sorties.find((s) => s.id === sortieId) || sortie;
+
   const setTarget = (i) => {
     targetParty = i;
     openPartyModal._targetParty = i;
@@ -762,7 +764,7 @@ function openPartyModal(sortieId) {
       const mid = heldMemberId;
       heldMemberId = null;
       openPartyModal._heldMemberId = null;
-      placeSortieMember(sortie.id, mid, i, { toggleIfSame: false });
+      placeSortieMember(sortieId, mid, i, { toggleIfSame: false });
       return;
     }
     paintParties();
@@ -798,14 +800,16 @@ function openPartyModal(sortieId) {
         e.dataTransfer.getData(MEMBER_DRAG_TYPE) || e.dataTransfer.getData('text/plain');
       if (!id) return;
       openPartyModal._targetParty = partyIndex;
-      placeSortieMember(sortie.id, id, partyIndex, { toggleIfSame: false });
+      placeSortieMember(sortieId, id, partyIndex, { toggleIfSame: false });
     });
   };
 
   const paintParties = () => {
+    const live = getSortie();
+    ensureParties(live);
     const partyEl = modalEl.querySelector('[data-party]');
     partyEl.replaceChildren();
-    const groups = partyMemberLists(sortie);
+    const groups = partyMemberLists(live);
     groups.forEach((group, gi) => {
       const block = document.createElement('div');
       block.className = `party-group${targetParty === gi ? ' is-target' : ''}${
@@ -846,7 +850,7 @@ function openPartyModal(sortieId) {
           rm.textContent = '×';
           rm.addEventListener('click', (e) => {
             e.stopPropagation();
-            removeSortieMember(sortie.id, m.id);
+            removeSortieMember(sortieId, m.id);
           });
           chip.append(name, rm);
           bindMemberDrag(chip, m.id);
@@ -884,6 +888,7 @@ function openPartyModal(sortieId) {
   };
 
   const paintMembers = () => {
+    const live = getSortie();
     const membersEl = modalEl.querySelector('[data-members]');
     membersEl.replaceChildren();
     const sorted = [...state.members].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
@@ -892,7 +897,7 @@ function openPartyModal(sortieId) {
       return;
     }
     for (const m of sorted) {
-      const partyIdx = findMemberPartyIndex(sortie, m.id);
+      const partyIdx = findMemberPartyIndex(live, m.id);
       const onTarget = partyIdx === targetParty;
       const held = heldMemberId === m.id;
       const row = document.createElement('button');
@@ -922,7 +927,7 @@ function openPartyModal(sortieId) {
           showToast(`${m.name} を選択中 — 入れたいパーティをタップ`);
           return;
         }
-        placeSortieMember(sortie.id, m.id, targetParty, { toggleIfSame: true });
+        placeSortieMember(sortieId, m.id, targetParty, { toggleIfSame: true });
       });
       membersEl.appendChild(row);
     }
@@ -932,17 +937,14 @@ function openPartyModal(sortieId) {
   paintMembers();
 
   openPartyModal._repaint = () => {
-    const live = state.sorties.find((s) => s.id === sortieId);
-    if (!live) {
+    if (!getSortie()) {
       closeModal();
       render();
       return;
     }
-    // 同一オブジェクトを見続ける（persist 後も state 内の参照）
-    Object.assign(sortie, live);
     targetParty = Math.min(
       Math.max(0, openPartyModal._targetParty ?? targetParty),
-      Math.max(0, ensureParties(sortie).length - 1)
+      Math.max(0, ensureParties(getSortie()).length - 1)
     );
     openPartyModal._targetParty = targetParty;
     heldMemberId = openPartyModal._heldMemberId || null;
