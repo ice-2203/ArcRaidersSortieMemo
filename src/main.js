@@ -155,6 +155,76 @@ let clockTimer = null;
 const app = document.querySelector('#app');
 const PARTY_SIZE = 3;
 
+/** 1時間枠内の出撃タイミングメモ */
+const TIMING_TAGS = [
+  { id: 'on_hour', label: '0分開始', hint: '時間ちょうど（例: 20:00）から入る' },
+  { id: 'last_run', label: '最終便', hint: '時間の終盤（例: 20:50ごろ）に入る' },
+];
+const TIMING_TAG_IDS = new Set(TIMING_TAGS.map((t) => t.id));
+
+function normalizeTimingTags(raw) {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.map((x) => String(x || '').trim()).filter((id) => TIMING_TAG_IDS.has(id)))];
+}
+
+function ensureTimingTags(sortie) {
+  if (!sortie) return [];
+  sortie.timingTags = normalizeTimingTags(sortie.timingTags);
+  return sortie.timingTags;
+}
+
+function timingTagLabel(id) {
+  return TIMING_TAGS.find((t) => t.id === id)?.label || id;
+}
+
+function timingTagsLine(sortie) {
+  return ensureTimingTags(sortie)
+    .map((id) => timingTagLabel(id))
+    .join(' / ');
+}
+
+function appendTimingTagEls(parent, sortie, { className = 'timing-tag' } = {}) {
+  for (const id of ensureTimingTags(sortie)) {
+    const el = document.createElement('span');
+    el.className = `${className} ${className}--${id}`;
+    el.textContent = timingTagLabel(id);
+    parent.appendChild(el);
+  }
+}
+
+function toggleTimingTag(sortie, tagId) {
+  if (!sortie || !TIMING_TAG_IDS.has(tagId)) return;
+  const cur = ensureTimingTags(sortie);
+  sortie.timingTags = cur.includes(tagId) ? cur.filter((id) => id !== tagId) : [...cur, tagId];
+  sortie.updatedAt = Date.now();
+  persist({ sortieId: sortie.id });
+}
+
+function paintTimingTagPicker(host, sortie) {
+  if (!host || !sortie) return;
+  host.replaceChildren();
+  const label = document.createElement('span');
+  label.className = 'timing-tag-picker-label';
+  label.textContent = '時間帯メモ';
+  host.appendChild(label);
+  for (const opt of TIMING_TAGS) {
+    const on = ensureTimingTags(sortie).includes(opt.id);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `timing-tag-btn timing-tag-btn--${opt.id}${on ? ' is-on' : ''}`;
+    btn.textContent = opt.label;
+    btn.title = opt.hint;
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const live = state.sorties.find((s) => s.id === sortie.id) || sortie;
+      toggleTimingTag(live, opt.id);
+      paintTimingTagPicker(host, live);
+    });
+    host.appendChild(btn);
+  }
+}
+
 function chunkBy(list, size) {
   const out = [];
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
@@ -711,6 +781,7 @@ function applySharedBoard(board, { repairPush = false } = {}) {
     ? board.sorties.map((s) => ({
         ...s,
         parties: Array.isArray(s.parties) ? s.parties.map((p) => (Array.isArray(p) ? [...p] : [])) : [[]],
+        timingTags: normalizeTimingTags(s.timingTags),
         roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
       }))
     : [];
@@ -789,6 +860,7 @@ function discordCopyText(sortie) {
       .filter(Boolean)
       .join(' '),
     sortie.objective ? `「${sortie.objective}」` : '',
+    timingTagsLine(sortie),
     peopleLines,
   ]
     .filter(Boolean)
@@ -1029,6 +1101,7 @@ function openPartyModal(sortieId) {
     <div class="party-summary">
       <div class="party-summary-title">${esc(sortie.objective || '（内容未設定）')}</div>
       <div class="party-summary-meta" data-meta></div>
+      <div class="timing-tag-picker" data-timing-tags></div>
     </div>
     <p class="hint party-howto">
       パーティをタップしてメンバーを追加・外しできます（各${PARTY_SIZE}人・2人でもOK）。PCはドラッグでも移動できます。
@@ -1079,6 +1152,7 @@ function openPartyModal(sortieId) {
   }
 
   const getSortie = () => state.sorties.find((s) => s.id === sortieId) || sortie;
+  paintTimingTagPicker(modalEl.querySelector('[data-timing-tags]'), getSortie());
   const fillSheet = modalEl.querySelector('[data-fill-sheet]');
   let fillPartyIndex = null;
   /** @type {Set<string>} パーティ編集シート上の選択中メンバー */
@@ -1950,6 +2024,12 @@ function renderTrialCard(trial) {
           party.appendChild(none);
         }
         foot.appendChild(party);
+        if (ensureTimingTags(sortie).length) {
+          const timing = document.createElement('div');
+          timing.className = 'slot-timing-tags';
+          appendTimingTagEls(timing, sortie);
+          foot.appendChild(timing);
+        }
       }
       const cta = document.createElement('div');
       cta.className = 'slot-cta';
@@ -2141,6 +2221,12 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     cd.className = `sortie-time-cd${remain.kind === 'live' ? ' is-live' : ''}`;
     cd.textContent = remain.text;
     timeCol.append(range, cd);
+    if (ensureTimingTags(sortie).length) {
+      const timing = document.createElement('div');
+      timing.className = 'sortie-time-timing-tags';
+      appendTimingTagEls(timing, sortie);
+      timeCol.appendChild(timing);
+    }
     row.appendChild(timeCol);
   }
 
@@ -2175,6 +2261,8 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     map.textContent = sortie.map;
     meta.appendChild(map);
   }
+  // 重複まとまり内（時刻列なし）ではタグをメタ横に出す
+  if (hideTime) appendTimingTagEls(meta, sortie);
 
   const parties = document.createElement('div');
   parties.className = 'sortie-time-parties';
