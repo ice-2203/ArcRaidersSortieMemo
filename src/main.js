@@ -6,7 +6,6 @@ import {
   createSortie,
 } from './store.js';
 import { fetchWeeklyTrials, fetchScheduleSlots, slotKey } from './metaforge.js';
-import { fetchSharedBoard, pushSharedBoard } from './sync.js';
 import { SERVER_REGIONS, regionAbbr, regionLabel, MAP_OPTIONS, EVENT_OPTIONS, eventType, mapJa } from './names.js';
 
 const WEEK_MODE_KEY = 'arcraiders.sortieMemo.weekMode';
@@ -147,12 +146,6 @@ function refreshSortieRoster(sortie) {
   sortie.updatedAt = Date.now();
 }
 
-let boardPushTimer = null;
-let boardPullTimer = null;
-let boardSyncing = false;
-let boardReady = false;
-let boardError = '';
-
 function persist(opts = {}) {
   if (opts.sortieId) {
     const s = state.sorties.find((x) => x.id === opts.sortieId);
@@ -161,69 +154,6 @@ function persist(opts = {}) {
     for (const s of state.sorties) refreshSortieRoster(s);
   }
   saveState(state);
-  if (!opts.skipSync && boardReady) queueBoardPush();
-}
-
-function queueBoardPush() {
-  clearTimeout(boardPushTimer);
-  boardPushTimer = setTimeout(() => {
-    pushBoardNow().catch((e) => {
-      console.warn('[board push]', e);
-      boardError = String(e.message || e);
-    });
-  }, 450);
-}
-
-async function pushBoardNow() {
-  if (boardSyncing) {
-    queueBoardPush();
-    return;
-  }
-  boardSyncing = true;
-  try {
-    for (const s of state.sorties) refreshSortieRoster(s);
-    const board = await pushSharedBoard(state.sorties);
-    state.sorties = board.sorties;
-    saveState(state);
-    boardError = '';
-  } finally {
-    boardSyncing = false;
-  }
-}
-
-async function pullBoard({ migrateLocal = false } = {}) {
-  const localSorties = Array.isArray(state.sorties) ? state.sorties.slice() : [];
-  const board = await fetchSharedBoard();
-  if (migrateLocal && !(board.sorties && board.sorties.length) && localSorties.length) {
-    state.sorties = localSorties;
-    boardReady = true;
-    await pushBoardNow();
-    return;
-  }
-  state.sorties = board.sorties;
-  saveState(state);
-  boardReady = true;
-  boardError = '';
-}
-
-function startBoardPolling() {
-  clearInterval(boardPullTimer);
-  boardPullTimer = setInterval(() => {
-    // パーティ編集中は通信・再描画しない（入れ替えが重くなる）
-    if (document.hidden || boardSyncing || (modal && partySortieId)) return;
-    pullBoard()
-      .then(() => refreshUi())
-      .catch((e) => {
-        console.warn('[board pull]', e);
-      });
-  }, 20000);
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && !(modal && partySortieId)) {
-      pullBoard()
-        .then(() => refreshUi())
-        .catch(() => {});
-    }
-  });
 }
 
 /** 終了時刻を過ぎた出撃を削除。削除したら true */
@@ -431,7 +361,7 @@ function closeModal({ keepParty = false } = {}) {
   if (!keepParty) {
     partySortieId = null;
   }
-  // パーティ編集はモーダル中スキップした同期・背面更新を閉じるときにまとめて行う
+  // パーティ編集の結果をローカルに保存して背面を更新
   if (closingParty) {
     persist(editedSortieId ? { sortieId: editedSortieId } : {});
     render();
@@ -499,24 +429,25 @@ function refreshUi() {
 }
 
 /** 横レールを壊さず、指定トライアルのカードだけ差し替える */
-function refreshTrialCardInRail(trialId) {
+function refreshTrialCardInRail(trialId, scrollLeft) {
   const rail = app.querySelector('.trial-rail');
   if (!rail) {
-    render();
+    render({ keepRailScroll: scrollLeft });
     return false;
   }
-  const keep = Number.isFinite(trialRailScrollLeft) ? trialRailScrollLeft : rail.scrollLeft;
+  const keep = Number.isFinite(scrollLeft) ? scrollLeft : trialRailScrollLeft;
   const trial = visibleTrials().find((t) => String(t.id) === String(trialId));
   const old = rail.querySelector(`[data-trial-id="${CSS.escape(String(trialId))}"]`);
   if (!trial || !old) {
     render({ keepRailScroll: keep });
     return false;
   }
+  // 差し替え中に scroll-snap が先頭へ吸着しないようにする
+  const prevSnap = rail.style.scrollSnapType;
+  rail.style.scrollSnapType = 'none';
   const next = renderTrialCard(trial);
   old.replaceWith(next);
-  const snap = rail.style.scrollSnapType;
   const restore = () => {
-    rail.style.scrollSnapType = 'none';
     rail.scrollLeft = keep;
     trialRailScrollLeft = keep;
   };
@@ -525,7 +456,14 @@ function refreshTrialCardInRail(trialId) {
     restore();
     requestAnimationFrame(() => {
       restore();
-      rail.style.scrollSnapType = snap;
+      // snap は戻さず維持（戻すと iOS で先頭カードへ飛ぶことがある）
+      if (prevSnap && prevSnap !== 'none') {
+        // 位置確定後にだけ復帰
+        setTimeout(() => {
+          restore();
+          rail.style.scrollSnapType = prevSnap;
+        }, 50);
+      }
     });
   });
   return true;
@@ -547,7 +485,7 @@ function removeSortieMember(sortieId, memberId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   removeMemberFromParties(sortie, memberId);
-  persist({ skipSync: true, sortieId });
+  persist({ sortieId });
   if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
@@ -562,7 +500,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
   if (current === partyIndex) {
     if (toggleIfSame) {
       removeMemberFromParties(sortie, memberId);
-      persist({ skipSync: true, sortieId });
+      persist({ sortieId });
       if (!repaintPartyModal({ light: true })) {
         render();
         openPartyModal(sortieId);
@@ -580,7 +518,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     showToast(`パーティ${partyIndex + 1}は満員です（最大${PARTY_SIZE}人）`);
     return;
   }
-  persist({ skipSync: true, sortieId });
+  persist({ sortieId });
   if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
@@ -750,7 +688,7 @@ function openPartyModal(sortieId) {
       state.members.push(member);
       const res = addMemberToParty(getSortie(), member.id, gi);
       fillName.value = '';
-      persist({ skipSync: true, sortieId });
+      persist({ sortieId });
       if (!res.ok) showToast(`パーティ${gi + 1}は満員です（最大${PARTY_SIZE}人）`);
       if (!repaintPartyModal()) {
         render();
@@ -950,7 +888,7 @@ function openPartyModal(sortieId) {
     if (!member) return showToast('名前を入れてください');
     state.members.push(member);
     nameInput.value = '';
-    persist({ skipSync: true });
+    persist();
     if (!repaintPartyModal()) {
       render();
       openPartyModal(sortieId);
@@ -964,7 +902,7 @@ function openPartyModal(sortieId) {
 
   modalEl.querySelector('[data-add-party]').addEventListener('click', () => {
     const res = addEmptyParty(getSortie());
-    persist({ skipSync: true, sortieId });
+    persist({ sortieId });
     openPartyModal._pendingFill = res.partyIndex;
     if (!repaintPartyModal()) {
       openPartyModal(sortieId);
@@ -1184,7 +1122,9 @@ function saveTrialPrefs(trialId, mapsSet, eventsSet, mapKeys, eventKeys) {
 
 function openTrialPrefsModal(trial) {
   const rail = app.querySelector('.trial-rail');
-  if (rail) trialRailScrollLeft = rail.scrollLeft;
+  // モーダル表示中に iOS が背面 scrollLeft を 0 にすることがあるので、開いた瞬間の値を固定保持する
+  const savedRailScroll = rail ? rail.scrollLeft : trialRailScrollLeft;
+  trialRailScrollLeft = savedRailScroll;
 
   const prefs = getTrialPrefs(trial.id);
   const initial = prefsToSelSets(prefs);
@@ -1199,7 +1139,7 @@ function openTrialPrefsModal(trial) {
     saveTrialPrefs(trial.id, selMaps, selEvents, mapKeys, eventKeys);
     closeModal();
     // レール全体を作り直すと横スクロールが飛ぶので、該当カードだけ差し替える
-    refreshTrialCardInRail(trial.id);
+    refreshTrialCardInRail(trial.id, savedRailScroll);
   };
 
   backdrop.addEventListener('click', (e) => {
@@ -1673,7 +1613,7 @@ function render(opts = {}) {
   top.innerHTML = `
     <div class="brand">
       <h1>出撃備忘録</h1>
-      <p>出撃予定は共有。メンバー登録はこの端末だけです</p>
+      <p>出撃予定・メンバーはこの端末に保存されます</p>
     </div>
   `;
   const actions = document.createElement('div');
@@ -1768,10 +1708,10 @@ function render(opts = {}) {
   hint.className = 'hint schedule-hint';
   hint.textContent =
     schedFilter === 'registered'
-      ? 'みんなの出撃予定を開始時刻順に表示します。行をタップするとメンバー編集できます。'
+      ? 'この端末の出撃予定を開始時刻順に表示します。行をタップするとメンバー編集できます。'
       : weekMode === 'next'
         ? '来週のトライアルです。マップ・イベントを選び、公開済みの時間枠があればメンバー登録できます。'
-        : 'カード上部をタップしてマップ・イベントを選び、時間枠でメンバー登録。出撃予定は全員で共有されます。';
+        : 'カード上部をタップしてマップ・イベントを選び、時間枠でメンバー登録。出撃予定はこの端末に保存されます。';
 
   const trials = visibleTrials();
   const main = document.createElement('div');
@@ -1807,43 +1747,28 @@ function render(opts = {}) {
     nextRail.addEventListener(
       'scroll',
       () => {
+        // モーダル中は iOS が背面を 0 に戻すことがあり、保存位置を壊すので無視
+        if (modal) return;
         trialRailScrollLeft = nextRail.scrollLeft;
       },
       { passive: true }
     );
     if (railScrollLeft > 0) {
-      const snap = nextRail.style.scrollSnapType;
       const restoreLeft = () => {
-        nextRail.style.scrollSnapType = 'none';
         nextRail.scrollLeft = railScrollLeft;
         trialRailScrollLeft = railScrollLeft;
       };
       restoreLeft();
       requestAnimationFrame(() => {
         restoreLeft();
-        requestAnimationFrame(() => {
-          restoreLeft();
-          nextRail.style.scrollSnapType = snap;
-        });
+        requestAnimationFrame(restoreLeft);
       });
     }
   }
 }
 
 render();
-(async () => {
-  try {
-    await pullBoard({ migrateLocal: true });
-  } catch (e) {
-    console.warn('[board]', e);
-    boardError = String(e.message || e);
-    boardReady = true;
-    showToast('共有ボードに接続できません（この端末のみで動作）');
-  }
-  refreshUi();
-  startBoardPolling();
-  loadSchedule();
-})();
+loadSchedule();
 clearInterval(clockTimer);
 clockTimer = setInterval(() => {
   pruneExpiredSorties();

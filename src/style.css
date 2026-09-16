@@ -318,7 +318,8 @@ input {
   overflow-x: auto;
   overflow-y: hidden;
   padding: 0;
-  scroll-snap-type: x proximity;
+  /* proximity snap はモーダル復帰時に先頭へ飛ぶことがあるので無効化 */
+  scroll-snap-type: none;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
   align-items: stretch;
@@ -1282,23 +1283,30 @@ input {
   gap: 6px;
   margin-bottom: 10px;
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .member-add-row input {
-  flex: 1 1 0;
+  flex: 1 1 0%;
   min-width: 0;
-  width: 0; /* flex 内で縮み、ボタンを押し出さない */
+  max-width: 100%;
   border: 1px solid var(--border2);
   border-radius: 8px;
   background: var(--bg3);
   padding: 7px 9px;
   outline: none;
   font-size: 16px; /* iOS フォーカス時のズーム防止 */
+  box-sizing: border-box;
 }
 
 .member-add-row .btn {
   flex: 0 0 auto;
   white-space: nowrap;
+  max-width: 30%;
+  box-sizing: border-box;
 }
 
 .member-list {
@@ -1410,7 +1418,10 @@ input {
 .modal-party {
   position: relative;
   width: min(760px, 100%);
+  max-width: 100%;
   max-height: min(92vh, 820px);
+  overflow-x: hidden;
+  box-sizing: border-box;
 }
 
 .party-modal-head {
