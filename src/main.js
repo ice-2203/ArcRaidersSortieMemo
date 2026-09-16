@@ -36,6 +36,8 @@ let selectedRegions = SERVER_REGIONS.map((r) => r.slug);
 let schedFilter = 'all';
 /** @type {'current' | 'next'} */
 let weekMode = loadWeekMode();
+/** トライアル横レールの scrollLeft（再描画で飛ばないよう保持） */
+let trialRailScrollLeft = 0;
 
 function visibleTrials() {
   return weekMode === 'next' ? trialsNext : trialsCurrent;
@@ -494,6 +496,39 @@ function refreshUi() {
   if (keepParty && state.sorties.some((s) => s.id === keepParty)) {
     openPartyModal(keepParty);
   }
+}
+
+/** 横レールを壊さず、指定トライアルのカードだけ差し替える */
+function refreshTrialCardInRail(trialId) {
+  const rail = app.querySelector('.trial-rail');
+  if (!rail) {
+    render();
+    return false;
+  }
+  const keep = Number.isFinite(trialRailScrollLeft) ? trialRailScrollLeft : rail.scrollLeft;
+  const trial = visibleTrials().find((t) => String(t.id) === String(trialId));
+  const old = rail.querySelector(`[data-trial-id="${CSS.escape(String(trialId))}"]`);
+  if (!trial || !old) {
+    render({ keepRailScroll: keep });
+    return false;
+  }
+  const next = renderTrialCard(trial);
+  old.replaceWith(next);
+  const snap = rail.style.scrollSnapType;
+  const restore = () => {
+    rail.style.scrollSnapType = 'none';
+    rail.scrollLeft = keep;
+    trialRailScrollLeft = keep;
+  };
+  restore();
+  requestAnimationFrame(() => {
+    restore();
+    requestAnimationFrame(() => {
+      restore();
+      rail.style.scrollSnapType = snap;
+    });
+  });
+  return true;
 }
 
 /** 出撃メンバーモーダルが開いていれば中身だけ描き直し（入力欄を潰さない） */
@@ -1148,6 +1183,9 @@ function saveTrialPrefs(trialId, mapsSet, eventsSet, mapKeys, eventKeys) {
 }
 
 function openTrialPrefsModal(trial) {
+  const rail = app.querySelector('.trial-rail');
+  if (rail) trialRailScrollLeft = rail.scrollLeft;
+
   const prefs = getTrialPrefs(trial.id);
   const initial = prefsToSelSets(prefs);
   let selMaps = initial.maps;
@@ -1159,10 +1197,9 @@ function openTrialPrefsModal(trial) {
   backdrop.className = 'modal-backdrop';
   const finish = () => {
     saveTrialPrefs(trial.id, selMaps, selEvents, mapKeys, eventKeys);
-    const rail = app.querySelector('.trial-rail');
-    const keepRailScroll = rail ? rail.scrollLeft : 0;
     closeModal();
-    render({ keepRailScroll });
+    // レール全体を作り直すと横スクロールが飛ぶので、該当カードだけ差し替える
+    refreshTrialCardInRail(trial.id);
   };
 
   backdrop.addEventListener('click', (e) => {
@@ -1625,8 +1662,10 @@ function render(opts = {}) {
   pruneExpiredSorties();
   const scrollY = window.scrollY;
   const prevRail = app.querySelector('.trial-rail');
-  const railScrollLeft =
-    Number.isFinite(opts.keepRailScroll) ? opts.keepRailScroll : prevRail ? prevRail.scrollLeft : 0;
+  if (prevRail) trialRailScrollLeft = prevRail.scrollLeft;
+  const railScrollLeft = Number.isFinite(opts.keepRailScroll)
+    ? opts.keepRailScroll
+    : trialRailScrollLeft;
   app.replaceChildren();
 
   const top = document.createElement('header');
@@ -1764,16 +1803,30 @@ function render(opts = {}) {
   app.append(top, toolbar, hint, main);
   window.scrollTo(0, scrollY);
   const nextRail = app.querySelector('.trial-rail');
-  if (nextRail && railScrollLeft > 0) {
-    const restoreLeft = () => {
-      nextRail.scrollLeft = railScrollLeft;
-    };
-    restoreLeft();
-    // scroll-snap / レイアウト確定後に先頭へ戻る端末向けに再適用
-    requestAnimationFrame(() => {
+  if (nextRail) {
+    nextRail.addEventListener(
+      'scroll',
+      () => {
+        trialRailScrollLeft = nextRail.scrollLeft;
+      },
+      { passive: true }
+    );
+    if (railScrollLeft > 0) {
+      const snap = nextRail.style.scrollSnapType;
+      const restoreLeft = () => {
+        nextRail.style.scrollSnapType = 'none';
+        nextRail.scrollLeft = railScrollLeft;
+        trialRailScrollLeft = railScrollLeft;
+      };
       restoreLeft();
-      requestAnimationFrame(restoreLeft);
-    });
+      requestAnimationFrame(() => {
+        restoreLeft();
+        requestAnimationFrame(() => {
+          restoreLeft();
+          nextRail.style.scrollSnapType = snap;
+        });
+      });
+    }
   }
 }
 
