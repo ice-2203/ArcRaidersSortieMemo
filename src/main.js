@@ -1265,7 +1265,7 @@ function openTrialPrefsModal(trial) {
   const apply = () => {
     saveTrialPrefs(trial.id, selMaps, selEvents, mapKeys, eventKeys);
     paint();
-    render();
+    // 背面は閉じるときにまとめて更新（毎回 render すると操作感が戻される）
   };
 
   const paint = () => {
