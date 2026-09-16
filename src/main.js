@@ -76,7 +76,7 @@ let selectedRegions = SERVER_REGIONS.map((r) => r.slug);
 let schedFilter = loadSchedFilter();
 /** @type {'current' | 'next'} */
 let weekMode = loadWeekMode();
-/** 出撃のみ表示時のメンバー絞り込み（選択した人が全員参加している出撃） */
+/** 出撃のみ表示時のメンバー絞り込み（選んだ人のいずれかが参加している出撃） */
 let memberFilterIds = loadMemberFilterIds();
 /** トライアル横レールの scrollLeft（再描画で飛ばないよう保持） */
 let trialRailScrollLeft = 0;
@@ -260,14 +260,14 @@ function sortieMemberIdSet(sortie) {
   return new Set((sortie.memberIds || []).filter(Boolean));
 }
 
-/** 選択メンバーがすべて参加している出撃か（未選択ならすべて対象） */
+/** 選択メンバーのいずれかが参加している出撃か（未選択ならすべて対象） */
 function sortieMatchesMemberFilter(sortie, selectedIds = memberFilterIds) {
   if (!selectedIds || selectedIds.size === 0) return true;
   const inSortie = sortieMemberIdSet(sortie);
   for (const id of selectedIds) {
-    if (!inSortie.has(id)) return false;
+    if (inSortie.has(id)) return true;
   }
-  return true;
+  return false;
 }
 
 function findMemberPartyIndex(sortie, memberId) {
@@ -2727,7 +2727,7 @@ function openMemberFilterModal() {
         <h3>メンバーで絞り込み</h3>
         <button type="button" class="btn modal-close" data-act="close">閉じる</button>
       </div>
-      <p class="hint">選んだ人が全員参加しているレイドだけ表示します（${memberFilterIds.size}人選択中）</p>
+      <p class="hint">選んだ人が1人でも参加しているレイドを表示します（${memberFilterIds.size}人選択中）</p>
       <div class="member-filter-pick-list" data-list></div>
       <div class="modal-actions">
         <button type="button" class="btn" data-act="clear"${memberFilterIds.size ? '' : ' disabled'}>クリア</button>
@@ -3089,7 +3089,7 @@ function renderRegisteredTimeline() {
     const actions = document.createElement('div');
     actions.className = 'empty-sorties-actions';
     if (memberFilterIds.size) {
-      msg.textContent = '選択したメンバーが全員参加しているレイドはありません';
+      msg.textContent = '選択したメンバーが参加しているレイドはありません';
       const clear = document.createElement('button');
       clear.type = 'button';
       clear.className = 'btn btn-primary';
