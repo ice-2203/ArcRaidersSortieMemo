@@ -154,6 +154,7 @@ let partySortieId = null;
 let modal = null;
 let toastTimer = null;
 let clockTimer = null;
+let countdownTimer = null;
 
 const app = document.querySelector('#app');
 const PARTY_SIZE = 3;
@@ -1116,7 +1117,7 @@ function formatCountdownHmsShort(ms) {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
-  if (h > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m ${String(s).padStart(2, '0')}s`;
   return `${m}m ${String(s).padStart(2, '0')}s`;
 }
 
@@ -1124,6 +1125,35 @@ function remainText(startMs, endMs, now = Date.now()) {
   if (now >= endMs) return { text: '—', kind: 'past' };
   if (now >= startMs) return { text: '実施中', kind: 'live' };
   return { text: formatCountdownHmsShort(startMs - now), kind: '' };
+}
+
+/** カウントダウン要素に開始/終了を紐づけ、後から1秒更新できるようにする */
+function bindCountdownEl(el, startMs, endMs, liveClass = 'is-live') {
+  el.dataset.cdStart = String(startMs);
+  el.dataset.cdEnd = String(endMs);
+  el.dataset.cdLiveClass = liveClass;
+  const remain = remainText(startMs, endMs);
+  el.textContent = remain.text;
+  if (liveClass) el.classList.toggle(liveClass, remain.kind === 'live');
+  return el;
+}
+
+function tickCountdowns(now = Date.now()) {
+  if (!app) return;
+  app.querySelectorAll('[data-cd-start][data-cd-end]').forEach((el) => {
+    const startMs = Number(el.dataset.cdStart);
+    const endMs = Number(el.dataset.cdEnd);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return;
+    const liveClass = el.dataset.cdLiveClass || 'is-live';
+    const remain = remainText(startMs, endMs, now);
+    if (el.textContent !== remain.text) el.textContent = remain.text;
+    if (liveClass) el.classList.toggle(liveClass, remain.kind === 'live');
+    const host = el.closest('.sortie-time-row, .sortie-overlap-cluster');
+    if (host) {
+      if (remain.kind === 'live') host.classList.add('is-live');
+      else if (remain.kind !== 'live') host.classList.remove('is-live');
+    }
+  });
 }
 
 function createSrvAbbr(slug) {
@@ -2416,8 +2446,8 @@ function renderTrialCard(trial) {
       date.textContent = fmtDateWeekJa(slot.startMs);
       row1Main.append(range, date);
       const cd = document.createElement('span');
-      cd.className = `trial-sched-cd${remain.kind === 'live' ? ' trial-sched-cd--live' : ''}`;
-      cd.textContent = remain.text;
+      cd.className = 'trial-sched-cd';
+      bindCountdownEl(cd, slot.startMs, slot.endMs, 'trial-sched-cd--live');
       row1.append(row1Main, cd);
 
       const row2 = document.createElement('div');
@@ -2665,8 +2695,8 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     range.className = 'sortie-time-range';
     range.innerHTML = `<span>${esc(start)}</span><span class="t-dash">-</span><span>${esc(end)}</span>`;
     const cd = document.createElement('div');
-    cd.className = `sortie-time-cd${remain.kind === 'live' ? ' is-live' : ''}`;
-    cd.textContent = remain.text;
+    cd.className = 'sortie-time-cd';
+    bindCountdownEl(cd, startMs, endMs, 'is-live');
     timeCol.append(range, cd);
     if (ensureTimingTags(sortie).length) {
       const timing = document.createElement('div');
@@ -2789,8 +2819,8 @@ function renderOverlapCluster(groupItems) {
     end
   )}</span></span>`;
   const cd = document.createElement('span');
-  cd.className = `sortie-time-cd${remain.kind === 'live' ? ' is-live' : ''}`;
-  cd.textContent = remain.text;
+  cd.className = 'sortie-time-cd';
+  bindCountdownEl(cd, first.startMs, first.endMs, 'is-live');
   time.appendChild(cd);
 
   const label = document.createElement('div');
@@ -3101,8 +3131,12 @@ render();
   loadSchedule();
 })();
 clearInterval(clockTimer);
+clearInterval(countdownTimer);
+countdownTimer = setInterval(() => {
+  tickCountdowns();
+}, 1000);
 clockTimer = setInterval(() => {
-  pruneExpiredSorties();
+  const pruned = pruneExpiredSorties();
   if (modal) {
     if (partySortieId && !state.sorties.some((s) => s.id === partySortieId)) {
       closeModal();
@@ -3110,7 +3144,10 @@ clockTimer = setInterval(() => {
     }
     return;
   }
+  // 終了したものがあるときだけ全面再描画（通常は1秒tickで足りる）
+  if (!pruned) return;
   const keep = partySortieId;
   render();
   if (keep && state.sorties.some((s) => s.id === keep)) openPartyModal(keep);
 }, 30000);
+tickCountdowns();
