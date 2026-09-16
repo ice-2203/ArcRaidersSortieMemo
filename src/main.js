@@ -382,7 +382,7 @@ function refreshSortieRoster(sortie) {
     const prev = next[id];
     const src = local || prev;
     if (!src) continue;
-    const avatarUrl = String(src.avatarUrl || '').startsWith('http') ? String(src.avatarUrl) : '';
+    const avatarUrl = sanitizeAvatarForRoster(src);
     next[id] = {
       id: String(src.id),
       name: String(src.name || '').trim() || 'メンバー',
@@ -401,6 +401,15 @@ let boardPullTimer = null;
 let boardSyncing = false;
 let boardReady = false;
 let boardError = '';
+/** ローカル変更の世代。pull 中に進んだらその結果は捨てる */
+let boardLocalGen = 0;
+/** 未反映の push がある（ポーリングで上書きされないようにする） */
+let boardPushPending = false;
+
+function noteLocalBoardChange() {
+  boardLocalGen += 1;
+  boardPushPending = true;
+}
 
 function persist(opts = {}) {
   if (opts.sortieId) {
@@ -410,25 +419,40 @@ function persist(opts = {}) {
     for (const s of state.sorties) refreshSortieRoster(s);
   }
   saveState(state);
-  if (!opts.skipSync && boardReady) queueBoardPush();
+  if (!opts.skipSync && boardReady) {
+    noteLocalBoardChange();
+    queueBoardPush();
+  }
 }
 
 function queueBoardPush() {
+  boardPushPending = true;
   clearTimeout(boardPushTimer);
   boardPushTimer = setTimeout(() => {
-    pushBoardNow().catch((e) => {
-      console.warn('[board push]', e);
-      boardError = String(e.message || e);
-    });
+    const gen = boardLocalGen;
+    pushBoardNow()
+      .then(() => {
+        if (boardLocalGen === gen) boardPushPending = false;
+      })
+      .catch((e) => {
+        console.warn('[board push]', e);
+        boardError = String(e.message || e);
+        if (boardLocalGen === gen) boardPushPending = false;
+      });
   }, 200);
 }
 
 async function pushBoardNow() {
   if (boardSyncing) {
-    queueBoardPush();
-    return;
+    // 進行中の push のあとに最新を送る
+    await new Promise((r) => setTimeout(r, 50));
+    if (boardSyncing) {
+      queueBoardPush();
+      return;
+    }
   }
   boardSyncing = true;
+  const gen = boardLocalGen;
   try {
     for (const s of state.sorties) {
       compactEmptyParties(s);
@@ -439,7 +463,11 @@ async function pushBoardNow() {
       sorties: state.sorties,
       members: state.members,
     });
-    applySharedBoard(board);
+    // push 中にさらにローカル変更がなければサーバ結果を反映
+    if (boardLocalGen === gen) {
+      applySharedBoard(board);
+      boardPushPending = false;
+    }
     boardError = '';
   } finally {
     boardSyncing = false;
@@ -447,9 +475,13 @@ async function pushBoardNow() {
 }
 
 async function pullBoard({ migrateLocal = false } = {}) {
+  const genAtStart = boardLocalGen;
   const localSorties = Array.isArray(state.sorties) ? state.sorties.slice() : [];
   const localMembers = Array.isArray(state.members) ? state.members.slice() : [];
   const board = await fetchSharedBoard();
+  // 取得中に解除・編集していたら古い共有で上書きしない
+  if (genAtStart !== boardLocalGen || boardPushPending) return;
+
   const boardHasSorties = Boolean(board.sorties?.length);
   const boardHasMembers = Boolean(board.members?.length);
 
@@ -458,6 +490,7 @@ async function pullBoard({ migrateLocal = false } = {}) {
     state.sorties = localSorties;
     state.members = localMembers;
     boardReady = true;
+    noteLocalBoardChange();
     await pushBoardNow();
     return;
   }
@@ -471,8 +504,8 @@ async function pullBoard({ migrateLocal = false } = {}) {
 function startBoardPolling() {
   clearInterval(boardPullTimer);
   boardPullTimer = setInterval(() => {
-    // パーティ編集中は通信・再描画しない（操作を重くしない）
-    if (document.hidden || boardSyncing || (modal && partySortieId)) return;
+    // パーティ編集中・未反映の push 中は取得しない（解除が復活するのを防ぐ）
+    if (document.hidden || boardSyncing || boardPushPending || (modal && partySortieId)) return;
     pullBoard()
       .then(() => refreshUi())
       .catch((e) => {
@@ -480,7 +513,7 @@ function startBoardPolling() {
       });
   }, 8000);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && !(modal && partySortieId)) {
+    if (!document.hidden && !boardPushPending && !(modal && partySortieId)) {
       pullBoard()
         .then(() => refreshUi())
         .catch(() => {});
@@ -630,6 +663,146 @@ async function renameMemberFromRoster(memberId) {
   return true;
 }
 
+function sanitizeAvatarForRoster(src) {
+  const v = String(src?.avatarDataUrl || src?.avatarUrl || '').trim();
+  if (v.startsWith('http') && v.length <= 500) return v;
+  if (v.startsWith('data:image/') && v.length <= 14000) return v;
+  return '';
+}
+
+function applyMemberAvatar(memberId, dataUrl) {
+  const member = state.members.find((m) => m.id === memberId);
+  if (!member) return false;
+  if (!dataUrl) {
+    member.avatarDataUrl = null;
+    member.avatarUrl = null;
+  } else if (dataUrl.startsWith('http')) {
+    member.avatarUrl = dataUrl.slice(0, 500);
+    member.avatarDataUrl = null;
+  } else {
+    member.avatarDataUrl = dataUrl;
+    member.avatarUrl = dataUrl.length <= 14000 ? dataUrl : null;
+  }
+  persist();
+  return true;
+}
+
+/** 画像を正方形に切り出して小さい data URL にする（共有ボード用） */
+function readImageAsAvatarDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !String(file.type || '').startsWith('image/')) {
+      reject(new Error('画像ファイルを選んでください'));
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      reject(new Error('画像が大きすぎます（8MBまで）'));
+      return;
+    }
+    const objUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objUrl);
+      const tryEncode = (size, quality) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        const scale = Math.max(size / img.naturalWidth, size / img.naturalHeight);
+        const w = img.naturalWidth * scale;
+        const h = img.naturalHeight * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+        return canvas.toDataURL('image/jpeg', quality);
+      };
+      let dataUrl = tryEncode(96, 0.72);
+      if (!dataUrl) {
+        reject(new Error('画像の変換に失敗しました'));
+        return;
+      }
+      let q = 0.72;
+      while (dataUrl.length > 12000 && q > 0.45) {
+        q -= 0.08;
+        dataUrl = tryEncode(96, q) || dataUrl;
+      }
+      if (dataUrl.length > 14000) dataUrl = tryEncode(72, 0.55) || dataUrl;
+      if (dataUrl.length > 14000) {
+        reject(new Error('画像を十分に小さくできませんでした'));
+        return;
+      }
+      resolve(dataUrl);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objUrl);
+      reject(new Error('画像を読み込めませんでした'));
+    };
+    img.src = objUrl;
+  });
+}
+
+async function editMemberAvatarFromRoster(memberId) {
+  const member = state.members.find((m) => m.id === memberId);
+  if (!member) return false;
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop modal-backdrop--confirm';
+    const modalEl = document.createElement('div');
+    modalEl.className = 'modal modal-confirm modal-avatar-edit';
+
+    const paint = () => {
+      const live = state.members.find((m) => m.id === memberId) || member;
+      const src = live.avatarDataUrl || live.avatarUrl;
+      modalEl.innerHTML = `
+        <h3>アイコンを変更</h3>
+        <p class="hint avatar-edit-name">${esc(live.name || '')}</p>
+        <div class="avatar-edit-preview" data-preview></div>
+        <p class="hint">画像を選ぶと自動で小さくして保存・共有されます。</p>
+        <div class="avatar-edit-actions">
+          <label class="btn btn-primary avatar-edit-file">
+            画像を選ぶ
+            <input type="file" accept="image/*" data-file hidden />
+          </label>
+          <button type="button" class="btn" data-act="clear"${src ? '' : ' disabled'}>アイコンを消す</button>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-ghost" data-act="close">閉じる</button>
+        </div>
+      `;
+      const preview = modalEl.querySelector('[data-preview]');
+      preview.appendChild(avatarNode(live));
+      const finish = (ok) => {
+        backdrop.remove();
+        resolve(ok);
+      };
+      backdrop.onclick = (e) => {
+        if (e.target === backdrop) finish(false);
+      };
+      modalEl.querySelector('[data-act="close"]').addEventListener('click', () => finish(true));
+      modalEl.querySelector('[data-act="clear"]').addEventListener('click', () => {
+        applyMemberAvatar(memberId, null);
+        showToast('アイコンを消しました');
+        paint();
+      });
+      modalEl.querySelector('[data-file]').addEventListener('change', async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        try {
+          const dataUrl = await readImageAsAvatarDataUrl(file);
+          applyMemberAvatar(memberId, dataUrl);
+          showToast('アイコンを更新しました');
+          paint();
+        } catch (err) {
+          showToast(String(err.message || err));
+        }
+      });
+    };
+
+    paint();
+    backdrop.appendChild(modalEl);
+    document.body.appendChild(backdrop);
+  });
+}
+
 async function removeSortieById(sortieId) {
   const ok = await openConfirmModal({
     title: '出撃を解除',
@@ -639,11 +812,32 @@ async function removeSortieById(sortieId) {
     danger: true,
   });
   if (!ok) return false;
+  const wasOpen = partySortieId === sortieId;
   state.sorties = state.sorties.filter((s) => s.id !== sortieId);
-  persist();
-  if (partySortieId === sortieId) closeModal();
+  saveState(state);
+  // モーダルを閉じる（closeModal の再 persist で競合しないよう直接閉じる）
+  if (wasOpen) {
+    modal = null;
+    partySortieId = null;
+    openPartyModal._repaint = null;
+    document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
+  }
   render();
   showToast('出撃を解除しました');
+
+  // 共有へ即反映（デバウンス待ち＋ポール取得だと解除が戻ることがある）
+  if (boardReady) {
+    noteLocalBoardChange();
+    clearTimeout(boardPushTimer);
+    try {
+      await pushBoardNow();
+    } catch (e) {
+      console.warn('[board push]', e);
+      boardError = String(e.message || e);
+      boardPushPending = false;
+      showToast('端末では解除済み。共有への反映に失敗しました');
+    }
+  }
   return true;
 }
 
@@ -785,7 +979,16 @@ function applySharedBoard(board, { repairPush = false } = {}) {
         roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
       }))
     : [];
-  state.members = Array.isArray(board.members) ? board.members.map((m) => ({ ...m })) : [];
+  state.members = Array.isArray(board.members)
+    ? board.members.map((m) => {
+        const avatarUrl = String(m.avatarUrl || '').trim();
+        return {
+          ...m,
+          avatarUrl: avatarUrl || null,
+          avatarDataUrl: avatarUrl.startsWith('data:image/') ? avatarUrl : m.avatarDataUrl || null,
+        };
+      })
+    : [];
   let repaired = false;
   for (const s of state.sorties) {
     compactEmptyParties(s);
@@ -1416,12 +1619,39 @@ function openPartyModal(sortieId) {
       row.dataset.memberId = m.id;
       row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}`;
       row.appendChild(avatarNode(m));
+      const avBtn = row.querySelector('.avatar, .avatar-fallback');
+      if (avBtn) {
+        avBtn.classList.add('avatar--editable');
+        avBtn.title = 'アイコンを変更';
+        avBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await editMemberAvatarFromRoster(m.id);
+          if (!repaintPartyModal()) {
+            render();
+            openPartyModal(sortieId);
+          }
+        });
+      }
       const name = document.createElement('span');
       name.className = 'name';
       name.textContent = m.name;
       const mark = document.createElement('span');
       mark.className = 'pick-mark';
       mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
+      const iconEdit = document.createElement('button');
+      iconEdit.type = 'button';
+      iconEdit.className = 'member-pick-edit';
+      iconEdit.setAttribute('aria-label', `${m.name}のアイコンを変更`);
+      iconEdit.title = 'アイコンを変更';
+      iconEdit.textContent = 'アイコン';
+      iconEdit.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await editMemberAvatarFromRoster(m.id);
+        if (!repaintPartyModal()) {
+          render();
+          openPartyModal(sortieId);
+        }
+      });
       const edit = document.createElement('button');
       edit.type = 'button';
       edit.className = 'member-pick-edit';
@@ -1451,7 +1681,7 @@ function openPartyModal(sortieId) {
         }
         showToast(`${m.name} を名簿から削除しました`);
       });
-      row.append(name, mark, edit, del);
+      row.append(name, mark, iconEdit, edit, del);
       bindMemberDrag(row, m.id);
       row.addEventListener('click', () => {
         if (partyIdx >= 0) {
