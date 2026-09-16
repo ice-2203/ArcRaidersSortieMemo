@@ -223,14 +223,16 @@ async function pushBoardNow() {
   }
   boardSyncing = true;
   try {
-    for (const s of state.sorties) refreshSortieRoster(s);
+    for (const s of state.sorties) {
+      compactEmptyParties(s);
+      reconcileSortieAgainstMembers(s);
+      refreshSortieRoster(s);
+    }
     const board = await pushSharedBoard({
       sorties: state.sorties,
       members: state.members,
     });
-    state.sorties = board.sorties;
-    state.members = board.members;
-    saveState(state);
+    applySharedBoard(board);
     boardError = '';
   } finally {
     boardSyncing = false;
@@ -244,6 +246,7 @@ async function pullBoard({ migrateLocal = false } = {}) {
   const boardHasSorties = Boolean(board.sorties?.length);
   const boardHasMembers = Boolean(board.members?.length);
 
+  // 共有ボードが完全に空のときだけ、端末データを初回アップロード
   if (migrateLocal && !boardHasSorties && !boardHasMembers && (localSorties.length || localMembers.length)) {
     state.sorties = localSorties;
     state.members = localMembers;
@@ -251,20 +254,10 @@ async function pullBoard({ migrateLocal = false } = {}) {
     await pushBoardNow();
     return;
   }
-  // 出撃は共有済みだが名簿が未移行のとき、端末名簿を初回アップロード
-  if (migrateLocal && boardHasSorties && !boardHasMembers && localMembers.length) {
-    state.sorties = board.sorties;
-    state.members = localMembers;
-    boardReady = true;
-    await pushBoardNow();
-    return;
-  }
 
-  state.sorties = board.sorties;
-  state.members = Array.isArray(board.members) ? board.members : [];
-  for (const s of state.sorties) compactEmptyParties(s);
-  saveState(state);
+  // 共有側を正とする（端末の仮名簿・古いIDで上書きしない）
   boardReady = true;
+  applySharedBoard(board, { repairPush: true });
   boardError = '';
 }
 
@@ -403,6 +396,65 @@ function memberById(id, sortie = null) {
     if (s?.roster?.[id]) return s.roster[id];
   }
   return null;
+}
+
+function memberNameKey(name) {
+  return String(name || '').trim().toLocaleLowerCase('ja');
+}
+
+/**
+ * パーティ内のメンバーIDを共有名簿に合わせる。
+ * 名簿に無い名前（端末だけの仮登録など）はパーティから外す。
+ */
+function reconcileSortieAgainstMembers(sortie) {
+  if (!sortie) return false;
+  ensureParties(sortie);
+  const byId = new Map(state.members.map((m) => [m.id, m]));
+  const byName = new Map();
+  for (const m of state.members) {
+    const key = memberNameKey(m.name);
+    if (key && !byName.has(key)) byName.set(key, m);
+  }
+  const resolveId = (id) => {
+    if (byId.has(id)) return id;
+    const snap = sortie.roster?.[id];
+    const match = snap?.name ? byName.get(memberNameKey(snap.name)) : null;
+    return match ? match.id : null;
+  };
+  const before = JSON.stringify(sortie.parties);
+  sortie.parties = sortie.parties.map((party) => {
+    const next = [];
+    const seen = new Set();
+    for (const id of party) {
+      const resolved = resolveId(id);
+      if (!resolved || seen.has(resolved)) continue;
+      seen.add(resolved);
+      next.push(resolved);
+    }
+    return next.slice(0, PARTY_SIZE);
+  });
+  compactEmptyParties(sortie);
+  refreshSortieRoster(sortie);
+  return JSON.stringify(sortie.parties) !== before;
+}
+
+function applySharedBoard(board, { repairPush = false } = {}) {
+  state.sorties = Array.isArray(board.sorties)
+    ? board.sorties.map((s) => ({
+        ...s,
+        parties: Array.isArray(s.parties) ? s.parties.map((p) => (Array.isArray(p) ? [...p] : [])) : [[]],
+        roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
+      }))
+    : [];
+  state.members = Array.isArray(board.members) ? board.members.map((m) => ({ ...m })) : [];
+  let repaired = false;
+  for (const s of state.sorties) {
+    compactEmptyParties(s);
+    if (reconcileSortieAgainstMembers(s)) repaired = true;
+  }
+  saveState(state);
+  if (repairPush && repaired && boardReady) queueBoardPush();
+  return repaired;
 }
 
 function isRegisteredSlot(slot, trialId) {
