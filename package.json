@@ -7,7 +7,8 @@
     "dev": "concurrently -k \"node scripts/discord-dev-server.js\" \"vite\"",
     "dev:web": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "migrate:supabase": "node scripts/migrate-board-to-supabase.js"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

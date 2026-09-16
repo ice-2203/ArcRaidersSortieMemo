@@ -6,12 +6,15 @@ import {
   createSortie,
 } from './store.js';
 import { fetchWeeklyTrials, fetchScheduleSlots, slotKey } from './metaforge.js';
-import { fetchSharedBoard, pushSharedBoard } from './sync.js';
+import { fetchSharedBoard, pushSharedBoard, BoardSyncError } from './sync.js';
 import { SERVER_REGIONS, regionAbbr, regionLabel, MAP_OPTIONS, EVENT_OPTIONS, eventType, mapJa } from './names.js';
 
 const WEEK_MODE_KEY = 'arcraiders.sortieMemo.weekMode';
 const SCHED_FILTER_KEY = 'arcraiders.sortieMemo.schedFilter';
 const MEMBER_FILTER_KEY = 'arcraiders.sortieMemo.memberFilter';
+const DELETED_SORTIES_KEY = 'arcraiders.sortieMemo.deletedSorties';
+const BOARD_POLL_MS = 30000;
+const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function loadWeekMode() {
   try {
@@ -286,6 +289,7 @@ function applyMemberRename(memberId, nextName) {
   if (!trimmed) return { ok: false, reason: 'empty' };
   if (trimmed === member.name) return { ok: true, unchanged: true };
   member.name = trimmed;
+  member.updatedAt = Date.now();
   persist();
   return { ok: true, name: trimmed };
 }
@@ -403,12 +407,122 @@ let boardReady = false;
 let boardError = '';
 /** ローカル変更の世代。pull 中に進んだらその結果は捨てる */
 let boardLocalGen = 0;
-/** 未反映の push がある（ポーリングで上書きされないようにする） */
+/** 未反映の push がある */
 let boardPushPending = false;
+let boardLastPushAt = 0;
+let boardPushChain = Promise.resolve();
+/** @type {{ sorties: any[], members: any[], updatedAt: number } | null} */
+let cachedRemoteBoard = null;
+let cachedRemoteAt = 0;
+
+function rememberRemoteBoard(board) {
+  if (!board) return;
+  cachedRemoteBoard = {
+    sorties: Array.isArray(board.sorties) ? board.sorties : [],
+    members: Array.isArray(board.members) ? board.members : [],
+    updatedAt: Number(board.updatedAt) || Date.now(),
+  };
+  cachedRemoteAt = Date.now();
+}
+
+async function getRemoteBoardForMerge() {
+  // 直近の取得結果があれば再利用（Gist rate limit 対策）
+  if (cachedRemoteBoard && Date.now() - cachedRemoteAt < 20000) {
+    return cachedRemoteBoard;
+  }
+  const board = await fetchSharedBoard();
+  rememberRemoteBoard(board);
+  return board;
+}
+
+function loadDeletedSortieMap() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DELETED_SORTIES_KEY) || '{}');
+    const map = new Map();
+    const now = Date.now();
+    for (const [id, at] of Object.entries(raw || {})) {
+      const ts = Number(at);
+      if (!id || !Number.isFinite(ts)) continue;
+      if (now - ts < TOMBSTONE_TTL_MS) map.set(String(id), ts);
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+function saveDeletedSortieMap(map) {
+  try {
+    localStorage.setItem(DELETED_SORTIES_KEY, JSON.stringify(Object.fromEntries(map)));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** @type {Map<string, number>} */
+let deletedSortieIds = loadDeletedSortieMap();
+
+function markSortieDeleted(sortieId) {
+  if (!sortieId) return;
+  deletedSortieIds.set(String(sortieId), Date.now());
+  saveDeletedSortieMap(deletedSortieIds);
+}
+
+function pruneDeletedSortieTombstones(remoteSorties) {
+  const remoteIds = new Set((remoteSorties || []).map((s) => String(s.id)));
+  let changed = false;
+  for (const id of [...deletedSortieIds.keys()]) {
+    if (!remoteIds.has(id)) {
+      deletedSortieIds.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) saveDeletedSortieMap(deletedSortieIds);
+}
 
 function noteLocalBoardChange() {
   boardLocalGen += 1;
   boardPushPending = true;
+}
+
+function mergeSortieLists(remoteList, localList) {
+  const map = new Map();
+  for (const s of remoteList || []) {
+    const id = String(s?.id || '');
+    if (!id || deletedSortieIds.has(id)) continue;
+    map.set(id, s);
+  }
+  for (const s of localList || []) {
+    const id = String(s?.id || '');
+    if (!id || deletedSortieIds.has(id)) continue;
+    const prev = map.get(id);
+    if (!prev || Number(s.updatedAt || 0) >= Number(prev.updatedAt || 0)) {
+      map.set(id, s);
+    }
+  }
+  return [...map.values()];
+}
+
+function mergeMemberLists(remoteList, localList) {
+  const map = new Map();
+  for (const m of remoteList || []) {
+    const id = String(m?.id || '');
+    if (!id) continue;
+    map.set(id, m);
+  }
+  for (const m of localList || []) {
+    const id = String(m?.id || '');
+    if (!id) continue;
+    const prev = map.get(id);
+    const localTs = Number(m.updatedAt || m.createdAt || 0);
+    const prevTs = Number(prev?.updatedAt || prev?.createdAt || 0);
+    if (!prev || localTs >= prevTs) map.set(id, m);
+  }
+  return [...map.values()];
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function persist(opts = {}) {
@@ -429,28 +543,44 @@ function queueBoardPush() {
   boardPushPending = true;
   clearTimeout(boardPushTimer);
   boardPushTimer = setTimeout(() => {
+    enqueueBoardPush().catch(() => {});
+  }, 250);
+}
+
+/** 直列化した push（複数端末の競合を減らすため取得→マージ→保存） */
+function enqueueBoardPush() {
+  boardPushPending = true;
+  const run = async () => {
+    await flushBoardPushWithRetry();
+  };
+  boardPushChain = boardPushChain.then(run, run);
+  return boardPushChain;
+}
+
+async function flushBoardPushWithRetry() {
+  const maxAttempts = 4;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const gen = boardLocalGen;
-    pushBoardNow()
-      .then(() => {
-        if (boardLocalGen === gen) boardPushPending = false;
-      })
-      .catch((e) => {
-        console.warn('[board push]', e);
-        boardError = String(e.message || e);
-        if (boardLocalGen === gen) boardPushPending = false;
-      });
-  }, 200);
+    try {
+      await pushBoardNow();
+      if (boardLocalGen === gen) boardPushPending = false;
+      return;
+    } catch (e) {
+      lastErr = e;
+      boardError = String(e.message || e);
+      console.warn('[board push]', attempt, e);
+      const retryable = e instanceof BoardSyncError ? e.retryable : /rate limit|429|403|503|502/i.test(String(e.message || e));
+      if (!retryable || attempt === maxAttempts) break;
+      await sleep(Math.min(8000, 700 * 2 ** (attempt - 1)));
+      // リトライ前に新しいローカル変更があればそれを載せる
+    }
+  }
+  boardPushPending = false;
+  throw lastErr || new Error('共有ボードの保存に失敗しました');
 }
 
 async function pushBoardNow() {
-  if (boardSyncing) {
-    // 進行中の push のあとに最新を送る
-    await new Promise((r) => setTimeout(r, 50));
-    if (boardSyncing) {
-      queueBoardPush();
-      return;
-    }
-  }
   boardSyncing = true;
   const gen = boardLocalGen;
   try {
@@ -459,14 +589,36 @@ async function pushBoardNow() {
       reconcileSortieAgainstMembers(s);
       refreshSortieRoster(s);
     }
+
+    // 他端末の変更を取り込みつつ、ローカル削除・更新を優先マージ
+    let remote = { sorties: [], members: [], updatedAt: 0 };
+    try {
+      remote = await getRemoteBoardForMerge();
+    } catch (e) {
+      console.warn('[board push] remote fetch skipped', e);
+      if (cachedRemoteBoard) remote = cachedRemoteBoard;
+    }
+
+    const mergedSorties = mergeSortieLists(remote.sorties, state.sorties);
+    const mergedMembers = mergeMemberLists(remote.members, state.members);
+
     const board = await pushSharedBoard({
-      sorties: state.sorties,
-      members: state.members,
+      sorties: mergedSorties,
+      members: mergedMembers,
     });
+
+    rememberRemoteBoard(board);
+    pruneDeletedSortieTombstones(board.sorties);
+    boardLastPushAt = Date.now();
+
     // push 中にさらにローカル変更がなければサーバ結果を反映
     if (boardLocalGen === gen) {
       applySharedBoard(board);
       boardPushPending = false;
+    } else {
+      // 新しい変更があるのでローカル一覧は維持し、削除墓石だけ同期結果に合わせる
+      state.sorties = state.sorties.filter((s) => !deletedSortieIds.has(String(s.id)));
+      saveState(state);
     }
     boardError = '';
   } finally {
@@ -475,6 +627,9 @@ async function pushBoardNow() {
 }
 
 async function pullBoard({ migrateLocal = false } = {}) {
+  if (boardPushPending || boardSyncing) return;
+  if (Date.now() - boardLastPushAt < 4000) return;
+
   const genAtStart = boardLocalGen;
   const localSorties = Array.isArray(state.sorties) ? state.sorties.slice() : [];
   const localMembers = Array.isArray(state.members) ? state.members.slice() : [];
@@ -491,27 +646,27 @@ async function pullBoard({ migrateLocal = false } = {}) {
     state.members = localMembers;
     boardReady = true;
     noteLocalBoardChange();
-    await pushBoardNow();
+    await enqueueBoardPush();
     return;
   }
 
-  // 共有側を正とする（端末の仮名簿・古いIDで上書きしない）
   boardReady = true;
   applySharedBoard(board, { repairPush: true });
+  rememberRemoteBoard(board);
+  pruneDeletedSortieTombstones(board.sorties);
   boardError = '';
 }
 
 function startBoardPolling() {
   clearInterval(boardPullTimer);
   boardPullTimer = setInterval(() => {
-    // パーティ編集中・未反映の push 中は取得しない（解除が復活するのを防ぐ）
     if (document.hidden || boardSyncing || boardPushPending || (modal && partySortieId)) return;
     pullBoard()
       .then(() => refreshUi())
       .catch((e) => {
         console.warn('[board pull]', e);
       });
-  }, 8000);
+  }, BOARD_POLL_MS);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && !boardPushPending && !(modal && partySortieId)) {
       pullBoard()
@@ -683,6 +838,7 @@ function applyMemberAvatar(memberId, dataUrl) {
     member.avatarDataUrl = dataUrl;
     member.avatarUrl = dataUrl.length <= 14000 ? dataUrl : null;
   }
+  member.updatedAt = Date.now();
   persist();
   return true;
 }
@@ -747,6 +903,62 @@ async function editMemberAvatarFromRoster(memberId) {
     backdrop.className = 'modal-backdrop modal-backdrop--confirm';
     const modalEl = document.createElement('div');
     modalEl.className = 'modal modal-confirm modal-avatar-edit';
+    modalEl.tabIndex = -1;
+
+    const applyFromFile = async (file) => {
+      if (!file) return;
+      try {
+        const dataUrl = await readImageAsAvatarDataUrl(file);
+        applyMemberAvatar(memberId, dataUrl);
+        showToast('アイコンを更新しました');
+        paint();
+      } catch (err) {
+        showToast(String(err.message || err));
+      }
+    };
+
+    const applyFromClipboard = async () => {
+      try {
+        if (navigator.clipboard?.read) {
+          const items = await navigator.clipboard.read();
+          for (const item of items) {
+            const type = item.types.find((t) => t.startsWith('image/'));
+            if (!type) continue;
+            const blob = await item.getType(type);
+            await applyFromFile(new File([blob], 'clipboard.png', { type: blob.type || type }));
+            return;
+          }
+          showToast('クリップボードに画像がありません');
+          return;
+        }
+        showToast('Ctrl+V / ⌘V で画像を貼り付けてください');
+      } catch (err) {
+        const msg = String(err.message || err);
+        if (/denied|permission|not allowed/i.test(msg)) {
+          showToast('クリップボードの許可が必要です。Ctrl+V / ⌘V でも貼れます');
+        } else {
+          showToast(msg || '貼り付けに失敗しました');
+        }
+      }
+    };
+
+    const onPaste = (e) => {
+      const items = e.clipboardData?.items;
+      if (!items?.length) return;
+      for (const item of items) {
+        if (!item.type.startsWith('image/')) continue;
+        e.preventDefault();
+        const file = item.getAsFile();
+        applyFromFile(file);
+        return;
+      }
+    };
+
+    const finish = (ok) => {
+      document.removeEventListener('paste', onPaste);
+      backdrop.remove();
+      resolve(ok);
+    };
 
     const paint = () => {
       const live = state.members.find((m) => m.id === memberId) || member;
@@ -755,12 +967,13 @@ async function editMemberAvatarFromRoster(memberId) {
         <h3>アイコンを変更</h3>
         <p class="hint avatar-edit-name">${esc(live.name || '')}</p>
         <div class="avatar-edit-preview" data-preview></div>
-        <p class="hint">画像を選ぶと自動で小さくして保存・共有されます。</p>
+        <p class="hint">画像ファイル、またはクリップボードの画像（Ctrl+V / ⌘V）から設定できます。</p>
         <div class="avatar-edit-actions">
           <label class="btn btn-primary avatar-edit-file">
             画像を選ぶ
             <input type="file" accept="image/*" data-file hidden />
           </label>
+          <button type="button" class="btn" data-act="paste">クリップボードから</button>
           <button type="button" class="btn" data-act="clear"${src ? '' : ' disabled'}>アイコンを消す</button>
         </div>
         <div class="modal-actions">
@@ -769,14 +982,11 @@ async function editMemberAvatarFromRoster(memberId) {
       `;
       const preview = modalEl.querySelector('[data-preview]');
       preview.appendChild(avatarNode(live));
-      const finish = (ok) => {
-        backdrop.remove();
-        resolve(ok);
-      };
       backdrop.onclick = (e) => {
         if (e.target === backdrop) finish(false);
       };
       modalEl.querySelector('[data-act="close"]').addEventListener('click', () => finish(true));
+      modalEl.querySelector('[data-act="paste"]').addEventListener('click', () => applyFromClipboard());
       modalEl.querySelector('[data-act="clear"]').addEventListener('click', () => {
         applyMemberAvatar(memberId, null);
         showToast('アイコンを消しました');
@@ -785,21 +995,15 @@ async function editMemberAvatarFromRoster(memberId) {
       modalEl.querySelector('[data-file]').addEventListener('change', async (e) => {
         const file = e.target.files?.[0];
         e.target.value = '';
-        if (!file) return;
-        try {
-          const dataUrl = await readImageAsAvatarDataUrl(file);
-          applyMemberAvatar(memberId, dataUrl);
-          showToast('アイコンを更新しました');
-          paint();
-        } catch (err) {
-          showToast(String(err.message || err));
-        }
+        await applyFromFile(file);
       });
     };
 
+    document.addEventListener('paste', onPaste);
     paint();
     backdrop.appendChild(modalEl);
     document.body.appendChild(backdrop);
+    requestAnimationFrame(() => modalEl.focus());
   });
 }
 
@@ -813,6 +1017,7 @@ async function removeSortieById(sortieId) {
   });
   if (!ok) return false;
   const wasOpen = partySortieId === sortieId;
+  markSortieDeleted(sortieId);
   state.sorties = state.sorties.filter((s) => s.id !== sortieId);
   saveState(state);
   // モーダルを閉じる（closeModal の再 persist で競合しないよう直接閉じる）
@@ -825,17 +1030,27 @@ async function removeSortieById(sortieId) {
   render();
   showToast('出撃を解除しました');
 
-  // 共有へ即反映（デバウンス待ち＋ポール取得だと解除が戻ることがある）
   if (boardReady) {
     noteLocalBoardChange();
     clearTimeout(boardPushTimer);
     try {
-      await pushBoardNow();
+      await enqueueBoardPush();
+      showToast('共有にも反映しました');
     } catch (e) {
       console.warn('[board push]', e);
       boardError = String(e.message || e);
-      boardPushPending = false;
-      showToast('端末では解除済み。共有への反映に失敗しました');
+      const rateLimited = /rate limit|403|429/i.test(boardError);
+      showToast(
+        rateLimited
+          ? '端末では解除済み。共有が混み合っているため自動で再試行します'
+          : '端末では解除済み。共有への反映に失敗したため後で再試行します'
+      );
+      // 墓石があるので他端末の古い取得でもすぐには戻らない。少し置いて再送
+      setTimeout(() => {
+        if (!boardReady || !deletedSortieIds.size) return;
+        noteLocalBoardChange();
+        enqueueBoardPush().catch(() => {});
+      }, 15000);
     }
   }
   return true;
@@ -972,12 +1187,14 @@ function reconcileSortieAgainstMembers(sortie) {
 
 function applySharedBoard(board, { repairPush = false } = {}) {
   state.sorties = Array.isArray(board.sorties)
-    ? board.sorties.map((s) => ({
-        ...s,
-        parties: Array.isArray(s.parties) ? s.parties.map((p) => (Array.isArray(p) ? [...p] : [])) : [[]],
-        timingTags: normalizeTimingTags(s.timingTags),
-        roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
-      }))
+    ? board.sorties
+        .filter((s) => s && !deletedSortieIds.has(String(s.id)))
+        .map((s) => ({
+          ...s,
+          parties: Array.isArray(s.parties) ? s.parties.map((p) => (Array.isArray(p) ? [...p] : [])) : [[]],
+          timingTags: normalizeTimingTags(s.timingTags),
+          roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
+        }))
     : [];
   state.members = Array.isArray(board.members)
     ? board.members.map((m) => {

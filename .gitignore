@@ -26,3 +26,5 @@ dist-ssr
 .vercel
 data/
 .env*.local
+
+.env.local

@@ -33,9 +33,19 @@ http://localhost:5174
 
 ## 出撃予定の共有
 
-出撃枠・参加者は **GitHub Gist（無料）** に保存され、同じ URL を開いた人同士で同期されます（約20秒ごと＋タブ再表示時）。
-メンバー名簿やマップ／イベントの個人設定は、各ブラウザの localStorage のままです。
+出撃枠・参加者・名簿は **Supabase（無料枠・カード不要）** に保存され、同じ URL を開いた端末同士で同期されます（約30秒ごと＋タブ再表示時）。
 
-Upstash などの従量課金ストレージは使いません。Vercel の Hobby 無料枠＋ GitHub の無料 Gist だけで動きます。
+### セットアップ（初回・約3分）
 
-ローカル開発で Gist 設定が無いときは `data/shared-sorties.json` に保存します。
+1. [Supabase](https://supabase.com/) でアカウント作成 → **New project**（Free）
+2. 左メニュー **SQL Editor** → New query → リポジトリの `supabase/sortie_board.sql` を貼って **Run**
+3. **Project Settings → API** から次をコピー  
+   - Project URL → `SUPABASE_URL`  
+   - `service_role`（secret）→ `SUPABASE_SERVICE_ROLE_KEY`  
+   ※ `anon` public ではなく **service_role** を使ってください（サーバ専用）
+4. ローカルは `.env.local`、本番は Vercel Environment Variables に設定
+5. `npm run dev` を再起動。必要なら `npm run migrate:supabase`
+
+旧 Gist 設定が残っていて Supabase が空なら、起動時に **一度だけ自動移行**します。
+
+未設定のローカル開発では `data/shared-sorties.json` に保存します（端末間同期なし）。

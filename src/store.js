@@ -65,6 +65,7 @@ export function createMember({ name, avatarDataUrl, avatarUrl = null, discordId 
     avatarUrl: avatarUrl || null,
     discordId: discordId || null,
     createdAt: Date.now(),
+    updatedAt: Date.now(),
   };
 }
 
