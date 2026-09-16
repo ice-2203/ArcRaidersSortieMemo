@@ -966,10 +966,11 @@ function openPartyModal(sortieId) {
 
   const nameInput = modalEl.querySelector('[data-name]');
   const doAdd = () => {
+    const live = getSortie();
     const member = createMember({ name: nameInput.value });
     if (!member) return showToast('名前を入れてください');
     state.members.push(member);
-    const res = addMemberToParty(sortie, member.id, targetParty);
+    const res = addMemberToParty(live, member.id, targetParty);
     nameInput.value = '';
     persist();
     if (!res.ok) {
@@ -980,7 +981,7 @@ function openPartyModal(sortieId) {
     }
     if (!repaintPartyModal()) {
       render();
-      openPartyModal(sortie.id);
+      openPartyModal(sortieId);
     }
   };
   modalEl.querySelector('[data-add]').addEventListener('click', doAdd);
@@ -989,12 +990,12 @@ function openPartyModal(sortieId) {
   });
 
   modalEl.querySelector('[data-add-party]').addEventListener('click', () => {
-    const res = addEmptyParty(sortie);
+    const res = addEmptyParty(getSortie());
     persist();
     openPartyModal._targetParty = res.partyIndex;
     targetParty = res.partyIndex;
     if (!repaintPartyModal()) {
-      openPartyModal(sortie.id);
+      openPartyModal(sortieId);
     }
   });
 
@@ -1003,11 +1004,11 @@ function openPartyModal(sortieId) {
   });
   modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
   modalEl.querySelector('[data-act="copy"]').addEventListener('click', () => {
-    copyText(discordCopyText(sortie));
+    copyText(discordCopyText(getSortie()));
   });
   modalEl.querySelector('[data-act="remove"]').addEventListener('click', () => {
     if (!confirm('この出撃を解除しますか？')) return;
-    state.sorties = state.sorties.filter((s) => s.id !== sortie.id);
+    state.sorties = state.sorties.filter((s) => s.id !== sortieId);
     persist();
     closeModal();
     render();
