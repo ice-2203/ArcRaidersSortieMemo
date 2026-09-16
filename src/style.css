@@ -1192,6 +1192,119 @@ input {
   box-shadow: 0 0 0 3px rgba(98, 255, 106, 0.18);
 }
 
+.sortie-overlap-cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid rgba(255, 122, 26, 0.5);
+  border-radius: 12px;
+  background: rgba(255, 122, 26, 0.07);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  position: relative;
+}
+
+.sortie-overlap-cluster::before {
+  content: '';
+  position: absolute;
+  left: -19px;
+  top: 22px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent2);
+  border: 2px solid var(--accent2);
+  box-sizing: border-box;
+  box-shadow: 0 0 0 3px rgba(255, 122, 26, 0.18);
+}
+
+.sortie-overlap-cluster.is-live::before {
+  box-shadow: 0 0 0 3px rgba(98, 255, 106, 0.16), 0 0 0 3px rgba(255, 122, 26, 0.18);
+}
+
+.sortie-overlap-cluster-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid rgba(255, 122, 26, 0.28);
+  background: rgba(255, 122, 26, 0.1);
+}
+
+.sortie-overlap-cluster-time {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sortie-overlap-cluster-time .sortie-time-range {
+  color: #ffb070;
+}
+
+.sortie-overlap-cluster.is-live .sortie-overlap-cluster-time .sortie-time-range {
+  color: var(--accent3);
+}
+
+.sortie-overlap-cluster-label {
+  font-family: var(--fhead);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #ffb070;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 122, 26, 0.45);
+  background: rgba(255, 122, 26, 0.14);
+}
+
+.sortie-overlap-cluster-members {
+  flex: 1 1 140px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sortie-overlap-cluster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.sortie-time-row.is-overlap,
+.sortie-time-row.sortie-time-row--nested {
+  border-radius: 0;
+  box-shadow: none;
+  border-color: transparent;
+  border-bottom: 1px solid rgba(255, 122, 26, 0.2);
+  background: transparent;
+}
+
+.sortie-time-row.sortie-time-row--nested {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.sortie-time-row.sortie-time-row--nested::before {
+  display: none;
+}
+
+.sortie-overlap-cluster-list .sortie-time-row:last-child {
+  border-bottom: none;
+}
+
+.sortie-time-row.sortie-time-row--nested:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sortie-time-row.sortie-time-row--nested.is-live {
+  background: rgba(98, 255, 106, 0.05);
+}
+
 .sortie-time-col {
   display: flex;
   flex-direction: column;
@@ -1301,6 +1414,11 @@ input {
 @media (max-width: 640px) {
   .sortie-time-row {
     grid-template-columns: minmax(84px, 100px) minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
+
+  .sortie-time-row.sortie-time-row--nested {
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto;
   }
 
@@ -1707,13 +1825,16 @@ input {
   user-select: none;
 }
 
+.member-pick-edit,
 .member-pick-remove {
   appearance: none;
   border: none;
   background: transparent;
   color: var(--text3);
   cursor: pointer;
-  font-size: 1rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   line-height: 1;
   padding: 4px 6px;
   min-width: 32px;
@@ -1722,9 +1843,40 @@ input {
   border-radius: 6px;
 }
 
+.member-pick-edit {
+  border: 1px solid var(--border2);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text2);
+  padding: 5px 8px;
+  min-width: 0;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.member-pick-remove {
+  font-size: 1rem;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.member-pick-edit:hover {
+  color: var(--accent);
+  border-color: rgba(34, 184, 255, 0.45);
+  background: rgba(34, 184, 255, 0.12);
+}
+
 .member-pick-remove:hover {
   color: var(--danger);
   background: rgba(255, 93, 108, 0.12);
+}
+
+.modal-prompt .field {
+  margin-bottom: 14px;
+}
+
+.modal-prompt .field input {
+  font-size: 16px; /* iOS フォーカス時のズーム防止 */
 }
 
 .member-pick:hover {

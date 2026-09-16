@@ -208,6 +208,18 @@ function removeMemberFromParties(sortie, memberId) {
   compactEmptyParties(sortie);
 }
 
+/** 名簿の表示名を変更（参加中パーティの表示も更新） */
+function applyMemberRename(memberId, nextName) {
+  const member = state.members.find((m) => m.id === memberId);
+  if (!member) return { ok: false, reason: 'missing' };
+  const trimmed = String(nextName || '').trim();
+  if (!trimmed) return { ok: false, reason: 'empty' };
+  if (trimmed === member.name) return { ok: true, unchanged: true };
+  member.name = trimmed;
+  persist();
+  return { ok: true, name: trimmed };
+}
+
 /** 名簿から削除し、全出撃のパーティからも外す */
 async function deleteMemberFromRoster(memberId) {
   if (!memberId) return false;
@@ -470,6 +482,82 @@ function openConfirmModal({
     document.body.appendChild(backdrop);
     requestAnimationFrame(() => modalEl.querySelector('[data-act="ok"]')?.focus());
   });
+}
+
+/** 既存モーダルの上に重ねる1行入力ダイアログ（ブラウザ prompt は使わない） */
+function openPromptModal({
+  title = '入力',
+  label = '',
+  initialValue = '',
+  confirmLabel = 'OK',
+  cancelLabel = 'キャンセル',
+  placeholder = '',
+} = {}) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop modal-backdrop--confirm';
+    const modalEl = document.createElement('div');
+    modalEl.className = 'modal modal-confirm modal-prompt';
+    modalEl.innerHTML = `
+      <h3>${esc(title)}</h3>
+      <div class="field">
+        <label for="prompt-input">${esc(label || '内容')}</label>
+        <input id="prompt-input" type="text" data-prompt-input value="${esc(initialValue)}" placeholder="${esc(
+          placeholder
+        )}" autocomplete="off" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-act="cancel">${esc(cancelLabel)}</button>
+        <button type="button" class="btn btn-primary" data-act="ok">${esc(confirmLabel)}</button>
+      </div>
+    `;
+    const input = modalEl.querySelector('[data-prompt-input]');
+    const finish = (value) => {
+      backdrop.remove();
+      resolve(value);
+    };
+    const submit = () => finish(String(input.value || ''));
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) finish(null);
+    });
+    modalEl.querySelector('[data-act="cancel"]').addEventListener('click', () => finish(null));
+    modalEl.querySelector('[data-act="ok"]').addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submit();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        finish(null);
+      }
+    });
+    backdrop.appendChild(modalEl);
+    document.body.appendChild(backdrop);
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+
+async function renameMemberFromRoster(memberId) {
+  const member = state.members.find((m) => m.id === memberId);
+  if (!member) return false;
+  const next = await openPromptModal({
+    title: '名前を変更',
+    label: '新しい名前',
+    initialValue: member.name || '',
+    confirmLabel: '保存',
+    placeholder: '名前',
+  });
+  if (next == null) return false;
+  const res = applyMemberRename(memberId, next);
+  if (!res.ok) {
+    if (res.reason === 'empty') showToast('名前を入れてください');
+    return false;
+  }
+  if (!res.unchanged) showToast(`「${res.name}」に変更しました`);
+  return true;
 }
 
 async function removeSortieById(sortieId) {
@@ -1260,6 +1348,20 @@ function openPartyModal(sortieId) {
       const mark = document.createElement('span');
       mark.className = 'pick-mark';
       mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'member-pick-edit';
+      edit.setAttribute('aria-label', `${m.name}の名前を変更`);
+      edit.title = '名前を変更';
+      edit.textContent = '名前変更';
+      edit.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!(await renameMemberFromRoster(m.id))) return;
+        if (!repaintPartyModal()) {
+          render();
+          openPartyModal(sortieId);
+        }
+      });
       const del = document.createElement('button');
       del.type = 'button';
       del.className = 'member-pick-remove';
@@ -1275,7 +1377,7 @@ function openPartyModal(sortieId) {
         }
         showToast(`${m.name} を名簿から削除しました`);
       });
-      row.append(name, mark, del);
+      row.append(name, mark, edit, del);
       bindMemberDrag(row, m.id);
       row.addEventListener('click', () => {
         if (partyIdx >= 0) {
@@ -1945,6 +2047,238 @@ function memberFilterSummaryText() {
   return `${names.slice(0, 2).join('・')} 他${names.length - 2}人`;
 }
 
+function sortieMemberFingerprint(sortie) {
+  return [...sortieMemberIdSet(sortie)].sort().join('\u0001');
+}
+
+function sortieMemberNamesLine(sortie) {
+  const names = [...sortieMemberIdSet(sortie)]
+    .map((id) => memberById(id, sortie)?.name)
+    .filter(Boolean);
+  names.sort((a, b) => a.localeCompare(b, 'ja'));
+  return names.join('・');
+}
+
+/**
+ * 同じ時間帯・同じメンバー・複数トライアルの重複キー（対象外は null）
+ * @returns {Map<string, string>} sortieId → overlapKey
+ */
+function buildSortieOverlapKeyById(list) {
+  /** @type {Map<string, typeof list>} */
+  const byKey = new Map();
+  for (const item of list) {
+    const members = sortieMemberFingerprint(item.sortie);
+    if (!members) continue;
+    const key = `${item.startMs}|${item.endMs}|${members}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(item);
+  }
+  /** @type {Map<string, string>} */
+  const out = new Map();
+  for (const [key, group] of byKey) {
+    if (group.length < 2) continue;
+    const trialKeys = new Set(
+      group.map((g) => String(g.sortie.trialId || g.sortie.objective || g.sortie.id))
+    );
+    if (trialKeys.size < 2) continue;
+    for (const item of group) out.set(item.sortie.id, key);
+  }
+  return out;
+}
+
+/** 日内の出撃を、単独行 / 時間帯の重複まとまり に分割 */
+function partitionDayClusters(items, overlapKeyById) {
+  const used = new Set();
+  /** @type {{ kind: 'single' | 'overlap', items: typeof items }[]} */
+  const clusters = [];
+  for (const item of items) {
+    if (used.has(item.sortie.id)) continue;
+    const key = overlapKeyById.get(item.sortie.id);
+    if (!key) {
+      used.add(item.sortie.id);
+      clusters.push({ kind: 'single', items: [item] });
+      continue;
+    }
+    const group = items
+      .filter((x) => overlapKeyById.get(x.sortie.id) === key)
+      .sort(
+        (a, b) =>
+          String(a.sortie.objective || '').localeCompare(String(b.sortie.objective || ''), 'ja') ||
+          String(a.sortie.id).localeCompare(String(b.sortie.id))
+      );
+    for (const g of group) used.add(g.sortie.id);
+    clusters.push({ kind: 'overlap', items: group });
+  }
+  return clusters;
+}
+
+function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } = {}) {
+  const { sortie, startMs, endMs } = item;
+  const remain = remainText(startMs, endMs);
+  const { start, end } = fmtSlotRange(startMs, endMs);
+
+  const row = document.createElement('div');
+  row.className = 'sortie-time-row';
+  if (hideTime) row.classList.add('sortie-time-row--nested');
+  if (inOverlap) row.classList.add('is-overlap');
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+  if (remain.kind === 'live') row.classList.add('is-live');
+  row.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openPartyModal(sortie.id);
+    }
+  });
+
+  if (!hideTime) {
+    const timeCol = document.createElement('div');
+    timeCol.className = 'sortie-time-col';
+    const range = document.createElement('div');
+    range.className = 'sortie-time-range';
+    range.innerHTML = `<span>${esc(start)}</span><span class="t-dash">-</span><span>${esc(end)}</span>`;
+    const cd = document.createElement('div');
+    cd.className = `sortie-time-cd${remain.kind === 'live' ? ' is-live' : ''}`;
+    cd.textContent = remain.text;
+    timeCol.append(range, cd);
+    row.appendChild(timeCol);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'sortie-time-body';
+
+  const titleRow = document.createElement('div');
+  titleRow.className = 'sortie-time-title-row';
+  if (sortie.regionSlug) titleRow.appendChild(createSrvAbbr(sortie.regionSlug));
+  else if (sortie.server) {
+    const srv = document.createElement('span');
+    srv.className = 'tag';
+    srv.textContent = sortie.server;
+    titleRow.appendChild(srv);
+  }
+  const title = document.createElement('div');
+  title.className = 'sortie-time-title';
+  title.textContent = sortie.objective || '（内容未設定）';
+  titleRow.appendChild(title);
+
+  const meta = document.createElement('div');
+  meta.className = 'sortie-time-meta';
+  if (sortie.event) {
+    const ev = document.createElement('span');
+    ev.className = 'trial-ev-line';
+    setEventNameWithIcon(ev, sortie.event, remain.kind === 'live' ? 'act' : eventType(sortie.event));
+    meta.appendChild(ev);
+  }
+  if (sortie.map) {
+    const map = document.createElement('span');
+    map.className = 'tag';
+    map.textContent = sortie.map;
+    meta.appendChild(map);
+  }
+
+  const parties = document.createElement('div');
+  parties.className = 'sortie-time-parties';
+  const groups = partyMemberLists(sortie);
+  const filled = groups.filter((g) => g.length);
+  if (!filled.length) {
+    const none = document.createElement('span');
+    none.className = 'slot-party-empty';
+    none.textContent = '参加者なし';
+    parties.appendChild(none);
+  } else {
+    groups.forEach((group, gi) => {
+      if (!group.length) return;
+      const g = document.createElement('div');
+      g.className = 'slot-party-group';
+      if (filled.length > 1) {
+        const mark = document.createElement('span');
+        mark.className = 'slot-party-gmark';
+        mark.textContent = `${gi + 1}`;
+        g.appendChild(mark);
+      }
+      const names = document.createElement('span');
+      names.className = 'slot-party-names';
+      names.textContent = group.map((m) => m.name).join('・');
+      g.appendChild(names);
+      parties.appendChild(g);
+    });
+  }
+
+  // 重複まとまり内ではメンバーは見出しで共有表示
+  if (inOverlap) body.append(titleRow, meta);
+  else body.append(titleRow, meta, parties);
+
+  const actions = document.createElement('div');
+  actions.className = 'sortie-time-actions';
+
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'btn btn-primary sortie-time-edit';
+  editBtn.textContent = 'メンバー編集';
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openPartyModal(sortie.id);
+  });
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'btn btn-danger sortie-time-remove';
+  removeBtn.textContent = '出撃解除';
+  removeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    removeSortieById(sortie.id);
+  });
+
+  actions.append(editBtn, removeBtn);
+  row.append(body, actions);
+  row.addEventListener('click', () => openPartyModal(sortie.id));
+  return row;
+}
+
+function renderOverlapCluster(groupItems) {
+  const first = groupItems[0];
+  const { start, end } = fmtSlotRange(first.startMs, first.endMs);
+  const remain = remainText(first.startMs, first.endMs);
+  const memberLine = sortieMemberNamesLine(first.sortie);
+
+  const cluster = document.createElement('div');
+  cluster.className = 'sortie-overlap-cluster';
+  if (remain.kind === 'live') cluster.classList.add('is-live');
+
+  const head = document.createElement('div');
+  head.className = 'sortie-overlap-cluster-head';
+
+  const time = document.createElement('div');
+  time.className = 'sortie-overlap-cluster-time';
+  time.innerHTML = `<span class="sortie-time-range"><span>${esc(start)}</span><span class="t-dash">-</span><span>${esc(
+    end
+  )}</span></span>`;
+  const cd = document.createElement('span');
+  cd.className = `sortie-time-cd${remain.kind === 'live' ? ' is-live' : ''}`;
+  cd.textContent = remain.text;
+  time.appendChild(cd);
+
+  const label = document.createElement('div');
+  label.className = 'sortie-overlap-cluster-label';
+  label.textContent = `同じメンバーで重複 ×${groupItems.length}`;
+
+  const members = document.createElement('div');
+  members.className = 'sortie-overlap-cluster-members';
+  members.textContent = memberLine || '参加者なし';
+  members.title = memberLine;
+
+  head.append(time, label, members);
+
+  const list = document.createElement('div');
+  list.className = 'sortie-overlap-cluster-list';
+  for (const item of groupItems) {
+    list.appendChild(renderSortieTimelineRow(item, { hideTime: true, inOverlap: true }));
+  }
+
+  cluster.append(head, list);
+  return cluster;
+}
+
 /** 「出撃のみ」：時間順の縦一覧 */
 function renderRegisteredTimeline() {
   const root = document.createElement('div');
@@ -2007,6 +2341,8 @@ function renderRegisteredTimeline() {
     return root;
   }
 
+  const overlapKeyById = buildSortieOverlapKeyById(list);
+
   /** @type {Map<string, typeof list>} */
   const byDay = new Map();
   for (const item of list) {
@@ -2027,120 +2363,13 @@ function renderRegisteredTimeline() {
     const track = document.createElement('div');
     track.className = 'sortie-day-track';
 
-    for (const { sortie, startMs, endMs } of items) {
-      const remain = remainText(startMs, endMs);
-      const { start, end } = fmtSlotRange(startMs, endMs);
-
-      const row = document.createElement('div');
-      row.className = 'sortie-time-row';
-      row.setAttribute('role', 'button');
-      row.tabIndex = 0;
-      if (remain.kind === 'live') row.classList.add('is-live');
-      row.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          openPartyModal(sortie.id);
-        }
-      });
-
-      const timeCol = document.createElement('div');
-      timeCol.className = 'sortie-time-col';
-      const range = document.createElement('div');
-      range.className = 'sortie-time-range';
-      range.innerHTML = `<span>${esc(start)}</span><span class="t-dash">-</span><span>${esc(end)}</span>`;
-      const cd = document.createElement('div');
-      cd.className = `sortie-time-cd${remain.kind === 'live' ? ' is-live' : ''}`;
-      cd.textContent = remain.text;
-      timeCol.append(range, cd);
-
-      const body = document.createElement('div');
-      body.className = 'sortie-time-body';
-
-      const titleRow = document.createElement('div');
-      titleRow.className = 'sortie-time-title-row';
-      if (sortie.regionSlug) titleRow.appendChild(createSrvAbbr(sortie.regionSlug));
-      else if (sortie.server) {
-        const srv = document.createElement('span');
-        srv.className = 'tag';
-        srv.textContent = sortie.server;
-        titleRow.appendChild(srv);
-      }
-      const title = document.createElement('div');
-      title.className = 'sortie-time-title';
-      title.textContent = sortie.objective || '（内容未設定）';
-      titleRow.appendChild(title);
-
-      const meta = document.createElement('div');
-      meta.className = 'sortie-time-meta';
-      if (sortie.event) {
-        const ev = document.createElement('span');
-        ev.className = 'trial-ev-line';
-        setEventNameWithIcon(ev, sortie.event, remain.kind === 'live' ? 'act' : eventType(sortie.event));
-        meta.appendChild(ev);
-      }
-      if (sortie.map) {
-        const map = document.createElement('span');
-        map.className = 'tag';
-        map.textContent = sortie.map;
-        meta.appendChild(map);
-      }
-
-      const parties = document.createElement('div');
-      parties.className = 'sortie-time-parties';
-      const groups = partyMemberLists(sortie);
-      const filled = groups.filter((g) => g.length);
-      if (!filled.length) {
-        const none = document.createElement('span');
-        none.className = 'slot-party-empty';
-        none.textContent = '参加者なし';
-        parties.appendChild(none);
+    const clusters = partitionDayClusters(items, overlapKeyById);
+    for (const cluster of clusters) {
+      if (cluster.kind === 'overlap') {
+        track.appendChild(renderOverlapCluster(cluster.items));
       } else {
-        groups.forEach((group, gi) => {
-          if (!group.length) return;
-          const g = document.createElement('div');
-          g.className = 'slot-party-group';
-          if (filled.length > 1) {
-            const mark = document.createElement('span');
-            mark.className = 'slot-party-gmark';
-            mark.textContent = `${gi + 1}`;
-            g.appendChild(mark);
-          }
-          const names = document.createElement('span');
-          names.className = 'slot-party-names';
-          names.textContent = group.map((m) => m.name).join('・');
-          g.appendChild(names);
-          parties.appendChild(g);
-        });
+        track.appendChild(renderSortieTimelineRow(cluster.items[0]));
       }
-
-      body.append(titleRow, meta, parties);
-
-      const actions = document.createElement('div');
-      actions.className = 'sortie-time-actions';
-
-      const editBtn = document.createElement('button');
-      editBtn.type = 'button';
-      editBtn.className = 'btn btn-primary sortie-time-edit';
-      editBtn.textContent = 'メンバー編集';
-      editBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openPartyModal(sortie.id);
-      });
-
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'btn btn-danger sortie-time-remove';
-      removeBtn.textContent = '出撃解除';
-      removeBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        removeSortieById(sortie.id);
-      });
-
-      actions.append(editBtn, removeBtn);
-
-      row.append(timeCol, body, actions);
-      row.addEventListener('click', () => openPartyModal(sortie.id));
-      track.appendChild(row);
     }
 
     day.appendChild(track);
