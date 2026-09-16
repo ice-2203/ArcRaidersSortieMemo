@@ -428,7 +428,6 @@ function closeModal({ keepParty = false } = {}) {
   document.querySelector('.modal-backdrop')?.remove();
   if (!keepParty) {
     partySortieId = null;
-    openPartyModal._heldMemberId = null;
   }
   // パーティ編集はモーダル中スキップした同期・背面更新を閉じるときにまとめて行う
   if (closingParty) {
@@ -563,13 +562,6 @@ function openPartyModal(sortieId) {
   }
   partySortieId = sortieId;
   ensureParties(sortie);
-  let targetParty = Math.min(
-    Math.max(0, openPartyModal._targetParty ?? 0),
-    Math.max(0, sortie.parties.length - 1)
-  );
-  openPartyModal._targetParty = targetParty;
-  /** スマホ用: タップで掴んだメンバー */
-  let heldMemberId = openPartyModal._heldMemberId || null;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'modal-backdrop';
@@ -599,7 +591,7 @@ function openPartyModal(sortieId) {
       <div class="party-summary-meta" data-meta></div>
     </div>
     <p class="hint party-howto">
-      パーティは何個でも追加可／各${PARTY_SIZE}人（2人でもOK）。枠をタップして選択 → メンバーをタップで配置。PCはドラッグでも移動できます。
+      パーティをタップしてメンバーを追加・外しできます（各${PARTY_SIZE}人・2人でもOK）。PCはドラッグでも移動できます。
     </p>
     <div class="party-modal-grid">
       <section class="party-pane">
@@ -611,7 +603,7 @@ function openPartyModal(sortieId) {
       </section>
       <section class="party-pane">
         <div class="party-pane-head">
-          <div class="party-pane-label">メンバー</div>
+          <div class="party-pane-label">メンバー名簿</div>
         </div>
         <div class="member-add-row">
           <input data-name placeholder="名前を追加" />
@@ -624,6 +616,7 @@ function openPartyModal(sortieId) {
       <button type="button" class="btn btn-primary" data-act="copy">Discord用コピー</button>
       <button type="button" class="btn btn-danger" data-act="remove">出撃を解除</button>
     </div>
+    <div class="party-fill-sheet" data-fill-sheet hidden></div>
   `;
 
   const meta = modalEl.querySelector('[data-meta]');
@@ -646,20 +639,13 @@ function openPartyModal(sortieId) {
   }
 
   const getSortie = () => state.sorties.find((s) => s.id === sortieId) || sortie;
+  const fillSheet = modalEl.querySelector('[data-fill-sheet]');
+  let fillPartyIndex = null;
 
-  const setTarget = (i) => {
-    targetParty = i;
-    openPartyModal._targetParty = i;
-    // 掴み中ならそのパーティへ配置
-    if (heldMemberId) {
-      const mid = heldMemberId;
-      heldMemberId = null;
-      openPartyModal._heldMemberId = null;
-      placeSortieMember(sortieId, mid, i, { toggleIfSame: false });
-      return;
-    }
-    paintParties();
-    paintMembers();
+  const closeFillSheet = () => {
+    fillPartyIndex = null;
+    fillSheet.hidden = true;
+    fillSheet.replaceChildren();
   };
 
   const bindMemberDrag = (el, memberId) => {
@@ -669,8 +655,6 @@ function openPartyModal(sortieId) {
       e.dataTransfer.setData('text/plain', memberId);
       e.dataTransfer.effectAllowed = 'move';
       el.classList.add('is-dragging');
-      heldMemberId = null;
-      openPartyModal._heldMemberId = null;
     });
     el.addEventListener('dragend', () => el.classList.remove('is-dragging'));
   };
@@ -690,9 +674,99 @@ function openPartyModal(sortieId) {
       const id =
         e.dataTransfer.getData(MEMBER_DRAG_TYPE) || e.dataTransfer.getData('text/plain');
       if (!id) return;
-      openPartyModal._targetParty = partyIndex;
       placeSortieMember(sortieId, id, partyIndex, { toggleIfSame: false });
     });
+  };
+
+  const paintFillSheet = () => {
+    if (fillPartyIndex == null) return;
+    const live = getSortie();
+    ensureParties(live);
+    if (fillPartyIndex < 0 || fillPartyIndex >= live.parties.length) {
+      closeFillSheet();
+      return;
+    }
+    const gi = fillPartyIndex;
+    const group = partyMemberLists(live)[gi] || [];
+    fillSheet.hidden = false;
+    fillSheet.replaceChildren();
+
+    const head = document.createElement('div');
+    head.className = 'party-fill-head';
+    head.innerHTML = `
+      <div>
+        <div class="party-fill-title">パーティ ${gi + 1}</div>
+        <div class="hint">メンバーを選んで追加・外し（${group.length}/${PARTY_SIZE}）</div>
+      </div>
+      <button type="button" class="btn btn-ghost" data-fill-close>戻る</button>
+    `;
+    head.querySelector('[data-fill-close]').addEventListener('click', closeFillSheet);
+
+    const addRow = document.createElement('div');
+    addRow.className = 'member-add-row';
+    addRow.innerHTML = `
+      <input data-fill-name placeholder="名前を追加" />
+      <button type="button" class="btn" data-fill-add>追加</button>
+    `;
+    const fillName = addRow.querySelector('[data-fill-name]');
+    const doFillAdd = () => {
+      const member = createMember({ name: fillName.value });
+      if (!member) return showToast('名前を入れてください');
+      state.members.push(member);
+      const res = addMemberToParty(getSortie(), member.id, gi);
+      fillName.value = '';
+      persist({ skipSync: true, sortieId });
+      if (!res.ok) showToast(`パーティ${gi + 1}は満員です（最大${PARTY_SIZE}人）`);
+      if (!repaintPartyModal()) {
+        render();
+        openPartyModal(sortieId);
+      }
+    };
+    addRow.querySelector('[data-fill-add]').addEventListener('click', doFillAdd);
+    fillName.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doFillAdd();
+    });
+
+    const list = document.createElement('div');
+    list.className = 'party-fill-list';
+    const sorted = [...state.members].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+    if (!sorted.length) {
+      list.innerHTML = '<p class="hint">名簿が空です。上で名前を追加してください。</p>';
+    } else {
+      for (const m of sorted) {
+        const partyIdx = findMemberPartyIndex(live, m.id);
+        const inHere = partyIdx === gi;
+        const full = !inHere && group.length >= PARTY_SIZE;
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = `member-pick${inHere ? ' is-on' : ''}${full ? ' is-disabled' : ''}`;
+        row.disabled = full;
+        row.appendChild(avatarNode(m));
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = m.name;
+        const mark = document.createElement('span');
+        mark.className = 'pick-mark';
+        if (inHere) mark.textContent = '外す';
+        else if (partyIdx >= 0) mark.textContent = `P${partyIdx + 1}から移動`;
+        else if (full) mark.textContent = '満員';
+        else mark.textContent = '追加';
+        row.append(name, mark);
+        row.addEventListener('click', () => {
+          if (inHere) removeSortieMember(sortieId, m.id);
+          else placeSortieMember(sortieId, m.id, gi, { toggleIfSame: false });
+        });
+        list.appendChild(row);
+      }
+    }
+
+    fillSheet.append(head, addRow, list);
+    requestAnimationFrame(() => fillName.focus());
+  };
+
+  const openFillSheet = (partyIndex) => {
+    fillPartyIndex = partyIndex;
+    paintFillSheet();
   };
 
   const paintParties = () => {
@@ -703,14 +777,12 @@ function openPartyModal(sortieId) {
     const groups = partyMemberLists(live);
     groups.forEach((group, gi) => {
       const block = document.createElement('div');
-      block.className = `party-group${targetParty === gi ? ' is-target' : ''}${
-        heldMemberId ? ' is-droppable' : ''
-      }`;
+      block.className = 'party-group';
       block.tabIndex = 0;
       block.setAttribute('role', 'button');
       block.setAttribute(
         'aria-label',
-        `パーティ${gi + 1}を選択（${group.length}/${PARTY_SIZE}）`
+        `パーティ${gi + 1}のメンバーを編集（${group.length}/${PARTY_SIZE}）`
       );
       bindPartyDrop(block, gi);
 
@@ -724,13 +796,12 @@ function openPartyModal(sortieId) {
       if (!group.length) {
         const empty = document.createElement('div');
         empty.className = 'party-empty';
-        empty.textContent =
-          targetParty === gi ? '選択中 — メンバーをタップ／ドロップ' : 'タップで選択';
+        empty.textContent = 'タップしてメンバー追加';
         chips.appendChild(empty);
       } else {
         for (const m of group) {
           const chip = document.createElement('div');
-          chip.className = `party-chip${heldMemberId === m.id ? ' is-held' : ''}`;
+          chip.className = 'party-chip';
           chip.appendChild(avatarNode(m));
           const name = document.createElement('span');
           name.textContent = m.name;
@@ -748,30 +819,18 @@ function openPartyModal(sortieId) {
           chip.addEventListener('click', (e) => {
             if (e.target === rm || rm.contains(e.target)) return;
             e.stopPropagation();
-            // スマホ: 掴む ↔ 同じ人をもう一度で解除
-            if (heldMemberId === m.id) {
-              heldMemberId = null;
-              openPartyModal._heldMemberId = null;
-              paintParties();
-              updateMemberMarks();
-              return;
-            }
-            heldMemberId = m.id;
-            openPartyModal._heldMemberId = m.id;
-            paintParties();
-            updateMemberMarks();
-            showToast(`${m.name} を選択中 — 入れたいパーティをタップ`);
+            openFillSheet(gi);
           });
           chips.appendChild(chip);
         }
       }
       block.appendChild(chips);
 
-      block.addEventListener('click', () => setTarget(gi));
+      block.addEventListener('click', () => openFillSheet(gi));
       block.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          setTarget(gi);
+          openFillSheet(gi);
         }
       });
       partyEl.appendChild(block);
@@ -784,42 +843,30 @@ function openPartyModal(sortieId) {
     membersEl.replaceChildren();
     const sorted = [...state.members].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
     if (!sorted.length) {
-      membersEl.innerHTML = '<p class="hint">メンバーがいません。上で追加してください。</p>';
+      membersEl.innerHTML = '<p class="hint">名簿が空です。上で追加するか、パーティから追加してください。</p>';
       return;
     }
     for (const m of sorted) {
       const partyIdx = findMemberPartyIndex(live, m.id);
-      const onTarget = partyIdx === targetParty;
-      const held = heldMemberId === m.id;
       const row = document.createElement('button');
       row.type = 'button';
       row.dataset.memberId = m.id;
-      row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}${
-        onTarget ? ' is-target' : ''
-      }${held ? ' is-held' : ''}`;
+      row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}`;
       row.appendChild(avatarNode(m));
       const name = document.createElement('span');
       name.className = 'name';
       name.textContent = m.name;
       const mark = document.createElement('span');
       mark.className = 'pick-mark';
-      if (held) mark.textContent = '選択中';
-      else if (partyIdx < 0) mark.textContent = `P${targetParty + 1}へ`;
-      else if (onTarget) mark.textContent = '外す';
-      else mark.textContent = `P${partyIdx + 1}→P${targetParty + 1}`;
+      mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
       row.append(name, mark);
       bindMemberDrag(row, m.id);
       row.addEventListener('click', () => {
-        if (heldMemberId && heldMemberId !== m.id) {
-          // 別の人を掴み直し
-          heldMemberId = m.id;
-          openPartyModal._heldMemberId = m.id;
-          paintParties();
-          updateMemberMarks();
-          showToast(`${m.name} を選択中 — 入れたいパーティをタップ`);
+        if (partyIdx >= 0) {
+          removeSortieMember(sortieId, m.id);
           return;
         }
-        placeSortieMember(sortieId, m.id, targetParty, { toggleIfSame: true });
+        showToast('追加したいパーティをタップしてください');
       });
       membersEl.appendChild(row);
     }
@@ -837,58 +884,43 @@ function openPartyModal(sortieId) {
     for (const row of rows) {
       const id = row.getAttribute('data-member-id');
       const partyIdx = findMemberPartyIndex(live, id);
-      const onTarget = partyIdx === targetParty;
-      const held = heldMemberId === id;
-      row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}${
-        onTarget ? ' is-target' : ''
-      }${held ? ' is-held' : ''}`;
+      row.className = `member-pick${partyIdx >= 0 ? ' is-on' : ''}`;
       const mark = row.querySelector('.pick-mark');
-      if (!mark) continue;
-      if (held) mark.textContent = '選択中';
-      else if (partyIdx < 0) mark.textContent = `P${targetParty + 1}へ`;
-      else if (onTarget) mark.textContent = '外す';
-      else mark.textContent = `P${partyIdx + 1}→P${targetParty + 1}`;
+      if (mark) mark.textContent = partyIdx >= 0 ? `P${partyIdx + 1}` : '未配置';
     }
   };
 
   paintParties();
   paintMembers();
+  if (openPartyModal._pendingFill != null) {
+    const pending = openPartyModal._pendingFill;
+    openPartyModal._pendingFill = null;
+    openFillSheet(pending);
+  }
 
   openPartyModal._repaint = (opts = {}) => {
     if (!getSortie()) {
       closeModal();
       return;
     }
-    targetParty = Math.min(
-      Math.max(0, openPartyModal._targetParty ?? targetParty),
-      Math.max(0, ensureParties(getSortie()).length - 1)
-    );
-    openPartyModal._targetParty = targetParty;
-    heldMemberId = openPartyModal._heldMemberId || null;
     paintParties();
     if (opts.light) updateMemberMarks();
     else paintMembers();
+    if (fillPartyIndex != null) paintFillSheet();
   };
 
   const nameInput = modalEl.querySelector('[data-name]');
   const doAdd = () => {
-    const live = getSortie();
     const member = createMember({ name: nameInput.value });
     if (!member) return showToast('名前を入れてください');
     state.members.push(member);
-    const res = addMemberToParty(live, member.id, targetParty);
     nameInput.value = '';
-    persist({ skipSync: true, sortieId });
-    if (!res.ok) {
-      showToast(`パーティ${targetParty + 1}は満員です。別パーティを選んでください`);
-    } else {
-      openPartyModal._targetParty = res.partyIndex ?? targetParty;
-      targetParty = openPartyModal._targetParty;
-    }
+    persist({ skipSync: true });
     if (!repaintPartyModal()) {
       render();
       openPartyModal(sortieId);
     }
+    showToast(`${member.name} を名簿に追加しました。パーティをタップして配置してください`);
   };
   modalEl.querySelector('[data-add]').addEventListener('click', doAdd);
   nameInput.addEventListener('keydown', (e) => {
@@ -898,11 +930,13 @@ function openPartyModal(sortieId) {
   modalEl.querySelector('[data-add-party]').addEventListener('click', () => {
     const res = addEmptyParty(getSortie());
     persist({ skipSync: true, sortieId });
-    openPartyModal._targetParty = res.partyIndex;
-    targetParty = res.partyIndex;
+    openPartyModal._pendingFill = res.partyIndex;
     if (!repaintPartyModal()) {
       openPartyModal(sortieId);
+      return;
     }
+    openPartyModal._pendingFill = null;
+    openFillSheet(res.partyIndex);
   });
 
   modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
@@ -1125,8 +1159,10 @@ function openTrialPrefsModal(trial) {
   backdrop.className = 'modal-backdrop';
   const finish = () => {
     saveTrialPrefs(trial.id, selMaps, selEvents, mapKeys, eventKeys);
+    const rail = app.querySelector('.trial-rail');
+    const keepRailScroll = rail ? rail.scrollLeft : 0;
     closeModal();
-    render({ focusTrialId: trial.id });
+    render({ keepRailScroll });
   };
 
   backdrop.addEventListener('click', (e) => {
@@ -1589,7 +1625,8 @@ function render(opts = {}) {
   pruneExpiredSorties();
   const scrollY = window.scrollY;
   const prevRail = app.querySelector('.trial-rail');
-  const railScrollLeft = prevRail ? prevRail.scrollLeft : 0;
+  const railScrollLeft =
+    Number.isFinite(opts.keepRailScroll) ? opts.keepRailScroll : prevRail ? prevRail.scrollLeft : 0;
   app.replaceChildren();
 
   const top = document.createElement('header');
@@ -1727,22 +1764,16 @@ function render(opts = {}) {
   app.append(top, toolbar, hint, main);
   window.scrollTo(0, scrollY);
   const nextRail = app.querySelector('.trial-rail');
-  if (nextRail) {
+  if (nextRail && railScrollLeft > 0) {
     const restoreLeft = () => {
-      if (opts.focusTrialId) {
-        const focusCard = nextRail.querySelector(
-          `[data-trial-id="${CSS.escape(String(opts.focusTrialId))}"]`
-        );
-        if (focusCard) {
-          nextRail.scrollLeft = Math.max(0, focusCard.offsetLeft);
-          return;
-        }
-      }
       nextRail.scrollLeft = railScrollLeft;
     };
     restoreLeft();
-    // scroll-snap やレイアウト確定後に先頭へ戻る端末向けに再適用
-    requestAnimationFrame(restoreLeft);
+    // scroll-snap / レイアウト確定後に先頭へ戻る端末向けに再適用
+    requestAnimationFrame(() => {
+      restoreLeft();
+      requestAnimationFrame(restoreLeft);
+    });
   }
 }
 

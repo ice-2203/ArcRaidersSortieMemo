@@ -1408,6 +1408,7 @@ input {
 }
 
 .modal-party {
+  position: relative;
   width: min(760px, 100%);
   max-height: min(92vh, 820px);
 }
@@ -1542,14 +1543,7 @@ input {
   outline-offset: 2px;
 }
 
-.party-group.is-target {
-  border-color: rgba(34, 184, 255, 0.55);
-  box-shadow: 0 0 0 1px rgba(34, 184, 255, 0.2);
-  background: rgba(34, 184, 255, 0.06);
-}
-
-.party-group.is-drop,
-.party-group.is-droppable:hover {
+.party-group.is-drop {
   border-color: var(--accent3);
   background: rgba(98, 255, 106, 0.08);
 }
@@ -1589,13 +1583,6 @@ input {
   cursor: grab;
   touch-action: manipulation;
   user-select: none;
-}
-
-.party-chip.is-held,
-.member-pick.is-held {
-  border-color: var(--accent2);
-  box-shadow: 0 0 0 1px rgba(255, 122, 26, 0.35);
-  background: rgba(255, 122, 26, 0.1);
 }
 
 .party-chip.is-dragging,
@@ -1647,8 +1634,9 @@ input {
   background: rgba(98, 255, 106, 0.08);
 }
 
-.member-pick.is-target {
-  border-color: rgba(34, 184, 255, 0.45);
+.member-pick.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .member-pick .name {
@@ -1671,16 +1659,52 @@ input {
   color: var(--accent3);
 }
 
-.member-pick.is-held .pick-mark {
-  color: var(--accent2);
-}
-
 .member-pick-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
   max-height: min(36vh, 320px);
   overflow: auto;
+}
+
+.party-fill-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg2);
+  border-radius: 12px;
+  overflow: auto;
+}
+
+.party-fill-sheet[hidden] {
+  display: none !important;
+}
+
+.party-fill-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.party-fill-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.party-fill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 @media (max-width: 640px) {
