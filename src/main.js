@@ -90,16 +90,22 @@ function removeMemberFromParties(sortie, memberId) {
 }
 
 /** 名簿から削除し、全出撃のパーティからも外す */
-function deleteMemberFromRoster(memberId) {
+async function deleteMemberFromRoster(memberId) {
   if (!memberId) return false;
   const member = state.members.find((m) => m.id === memberId);
   if (!member) return false;
   const inParties = state.sorties.some((s) => findMemberPartyIndex(s, memberId) >= 0);
   const label = member.name || 'このメンバー';
-  const msg = inParties
-    ? `「${label}」を名簿から削除しますか？\n参加中のパーティからも外れます。`
-    : `「${label}」を名簿から削除しますか？`;
-  if (!confirm(msg)) return false;
+  const ok = await openConfirmModal({
+    title: '名簿から削除',
+    message: inParties
+      ? `「${label}」を名簿から削除しますか？参加中のパーティからも外れます。`
+      : `「${label}」を名簿から削除しますか？`,
+    confirmLabel: '削除する',
+    cancelLabel: 'キャンセル',
+    danger: true,
+  });
+  if (!ok) return false;
   state.members = state.members.filter((m) => m.id !== memberId);
   for (const s of state.sorties) {
     removeMemberFromParties(s, memberId);
@@ -307,6 +313,61 @@ function showToast(message) {
   document.body.appendChild(el);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.remove(), 2200);
+}
+
+/** 既存モーダルの上に重ねる確認ダイアログ（ブラウザ confirm は使わない） */
+function openConfirmModal({
+  title = '確認',
+  message = '',
+  confirmLabel = 'OK',
+  cancelLabel = 'キャンセル',
+  danger = false,
+} = {}) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop modal-backdrop--confirm';
+    const modalEl = document.createElement('div');
+    modalEl.className = 'modal modal-confirm';
+    modalEl.innerHTML = `
+      <h3>${esc(title)}</h3>
+      <p class="confirm-message">${esc(message)}</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" data-act="cancel">${esc(cancelLabel)}</button>
+        <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-act="ok">${esc(
+          confirmLabel
+        )}</button>
+      </div>
+    `;
+    const finish = (ok) => {
+      backdrop.remove();
+      resolve(ok);
+    };
+    backdrop.addEventListener('click', (e) => {
+      if (e.target === backdrop) finish(false);
+    });
+    modalEl.querySelector('[data-act="cancel"]').addEventListener('click', () => finish(false));
+    modalEl.querySelector('[data-act="ok"]').addEventListener('click', () => finish(true));
+    backdrop.appendChild(modalEl);
+    document.body.appendChild(backdrop);
+    requestAnimationFrame(() => modalEl.querySelector('[data-act="ok"]')?.focus());
+  });
+}
+
+async function removeSortieById(sortieId) {
+  const ok = await openConfirmModal({
+    title: '出撃を解除',
+    message: 'この出撃を解除しますか？',
+    confirmLabel: '解除する',
+    cancelLabel: 'キャンセル',
+    danger: true,
+  });
+  if (!ok) return false;
+  state.sorties = state.sorties.filter((s) => s.id !== sortieId);
+  persist();
+  if (partySortieId === sortieId) closeModal();
+  render();
+  showToast('出撃を解除しました');
+  return true;
 }
 
 function initials(name) {
@@ -1071,9 +1132,9 @@ function openPartyModal(sortieId) {
       del.setAttribute('aria-label', `${m.name}を名簿から削除`);
       del.title = '名簿から削除';
       del.textContent = '×';
-      del.addEventListener('click', (e) => {
+      del.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (!deleteMemberFromRoster(m.id)) return;
+        if (!(await deleteMemberFromRoster(m.id))) return;
         if (!repaintPartyModal()) {
           render();
           openPartyModal(sortieId);
@@ -1165,12 +1226,7 @@ function openPartyModal(sortieId) {
     copyText(discordCopyText(getSortie()));
   });
   modalEl.querySelector('[data-act="remove"]').addEventListener('click', () => {
-    if (!confirm('この出撃を解除しますか？')) return;
-    state.sorties = state.sorties.filter((s) => s.id !== sortieId);
-    persist();
-    closeModal();
-    render();
-    showToast('出撃を解除しました');
+    removeSortieById(sortieId);
   });
 
   backdrop.appendChild(modalEl);
@@ -1825,11 +1881,7 @@ function renderRegisteredTimeline() {
       removeBtn.textContent = '出撃解除';
       removeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (!confirm('この出撃を解除しますか？')) return;
-        state.sorties = state.sorties.filter((s) => s.id !== sortie.id);
-        persist();
-        render();
-        showToast('出撃を解除しました');
+        removeSortieById(sortie.id);
       });
 
       actions.append(editBtn, removeBtn);
