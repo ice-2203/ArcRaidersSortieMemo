@@ -6,6 +6,7 @@ import {
   createSortie,
 } from './store.js';
 import { fetchWeeklyTrials, fetchScheduleSlots, slotKey } from './metaforge.js';
+import { fetchSharedBoard, pushSharedBoard } from './sync.js';
 import { SERVER_REGIONS, regionAbbr, regionLabel, MAP_OPTIONS, EVENT_OPTIONS, eventType, mapJa } from './names.js';
 
 const WEEK_MODE_KEY = 'arcraiders.sortieMemo.weekMode';
@@ -112,6 +113,18 @@ function addMemberToParty(sortie, memberId, partyIndex) {
   return { ok: true, partyIndex: idx };
 }
 
+/** 指定パーティのメンバーをまとめて置き換え（最大 PARTY_SIZE） */
+function setPartyMembers(sortie, partyIndex, memberIds) {
+  ensureParties(sortie);
+  const ids = [...new Set((memberIds || []).filter(Boolean))].slice(0, PARTY_SIZE);
+  while (sortie.parties.length <= partyIndex) sortie.parties.push([]);
+  sortie.parties = sortie.parties.map((p, i) =>
+    i === partyIndex ? [] : p.filter((id) => !ids.includes(id))
+  );
+  sortie.parties[partyIndex] = ids;
+  sortie.memberIds = sortie.parties.flat();
+}
+
 function addEmptyParty(sortie) {
   ensureParties(sortie);
   // 末尾が空なら増やさずそこを選択
@@ -146,6 +159,12 @@ function refreshSortieRoster(sortie) {
   sortie.updatedAt = Date.now();
 }
 
+let boardPushTimer = null;
+let boardPullTimer = null;
+let boardSyncing = false;
+let boardReady = false;
+let boardError = '';
+
 function persist(opts = {}) {
   if (opts.sortieId) {
     const s = state.sorties.find((x) => x.id === opts.sortieId);
@@ -154,6 +173,69 @@ function persist(opts = {}) {
     for (const s of state.sorties) refreshSortieRoster(s);
   }
   saveState(state);
+  if (!opts.skipSync && boardReady) queueBoardPush();
+}
+
+function queueBoardPush() {
+  clearTimeout(boardPushTimer);
+  boardPushTimer = setTimeout(() => {
+    pushBoardNow().catch((e) => {
+      console.warn('[board push]', e);
+      boardError = String(e.message || e);
+    });
+  }, 200);
+}
+
+async function pushBoardNow() {
+  if (boardSyncing) {
+    queueBoardPush();
+    return;
+  }
+  boardSyncing = true;
+  try {
+    for (const s of state.sorties) refreshSortieRoster(s);
+    const board = await pushSharedBoard(state.sorties);
+    state.sorties = board.sorties;
+    saveState(state);
+    boardError = '';
+  } finally {
+    boardSyncing = false;
+  }
+}
+
+async function pullBoard({ migrateLocal = false } = {}) {
+  const localSorties = Array.isArray(state.sorties) ? state.sorties.slice() : [];
+  const board = await fetchSharedBoard();
+  if (migrateLocal && !(board.sorties && board.sorties.length) && localSorties.length) {
+    state.sorties = localSorties;
+    boardReady = true;
+    await pushBoardNow();
+    return;
+  }
+  state.sorties = board.sorties;
+  saveState(state);
+  boardReady = true;
+  boardError = '';
+}
+
+function startBoardPolling() {
+  clearInterval(boardPullTimer);
+  boardPullTimer = setInterval(() => {
+    // パーティ編集中は通信・再描画しない（操作を重くしない）
+    if (document.hidden || boardSyncing || (modal && partySortieId)) return;
+    pullBoard()
+      .then(() => refreshUi())
+      .catch((e) => {
+        console.warn('[board pull]', e);
+      });
+  }, 8000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !(modal && partySortieId)) {
+      pullBoard()
+        .then(() => refreshUi())
+        .catch(() => {});
+    }
+  });
 }
 
 /** 終了時刻を過ぎた出撃を削除。削除したら true */
@@ -361,7 +443,7 @@ function closeModal({ keepParty = false } = {}) {
   if (!keepParty) {
     partySortieId = null;
   }
-  // パーティ編集の結果をローカルに保存して背面を更新
+  // パーティ編集は閉じるときに共有ボードへ保存＆背面更新
   if (closingParty) {
     persist(editedSortieId ? { sortieId: editedSortieId } : {});
     render();
@@ -485,7 +567,7 @@ function removeSortieMember(sortieId, memberId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   removeMemberFromParties(sortie, memberId);
-  persist({ sortieId });
+  persist({ skipSync: true, sortieId });
   if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
@@ -500,7 +582,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
   if (current === partyIndex) {
     if (toggleIfSame) {
       removeMemberFromParties(sortie, memberId);
-      persist({ sortieId });
+      persist({ skipSync: true, sortieId });
       if (!repaintPartyModal({ light: true })) {
         render();
         openPartyModal(sortieId);
@@ -518,7 +600,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     showToast(`パーティ${partyIndex + 1}は満員です（最大${PARTY_SIZE}人）`);
     return;
   }
-  persist({ sortieId });
+  persist({ skipSync: true, sortieId });
   if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
@@ -614,9 +696,12 @@ function openPartyModal(sortieId) {
   const getSortie = () => state.sorties.find((s) => s.id === sortieId) || sortie;
   const fillSheet = modalEl.querySelector('[data-fill-sheet]');
   let fillPartyIndex = null;
+  /** @type {Set<string>} パーティ編集シート上の選択中メンバー */
+  let fillSelected = new Set();
 
   const closeFillSheet = () => {
     fillPartyIndex = null;
+    fillSelected = new Set();
     fillSheet.hidden = true;
     fillSheet.replaceChildren();
   };
@@ -651,6 +736,21 @@ function openPartyModal(sortieId) {
     });
   };
 
+  const applyFillSelection = () => {
+    if (fillPartyIndex == null) return;
+    const gi = fillPartyIndex;
+    const count = Math.min(fillSelected.size, PARTY_SIZE);
+    const live = getSortie();
+    setPartyMembers(live, gi, [...fillSelected]);
+    persist({ sortieId });
+    closeFillSheet();
+    if (!repaintPartyModal()) {
+      render();
+      openPartyModal(sortieId);
+    }
+    showToast(`パーティ${gi + 1}を更新しました（${count}/${PARTY_SIZE}）`);
+  };
+
   const paintFillSheet = () => {
     if (fillPartyIndex == null) return;
     const live = getSortie();
@@ -660,7 +760,7 @@ function openPartyModal(sortieId) {
       return;
     }
     const gi = fillPartyIndex;
-    const group = partyMemberLists(live)[gi] || [];
+    const selectedCount = fillSelected.size;
     fillSheet.hidden = false;
     fillSheet.replaceChildren();
 
@@ -669,7 +769,7 @@ function openPartyModal(sortieId) {
     head.innerHTML = `
       <div>
         <div class="party-fill-title">パーティ ${gi + 1}</div>
-        <div class="hint">メンバーを選んで追加・外し（${group.length}/${PARTY_SIZE}）</div>
+        <div class="hint">最大${PARTY_SIZE}人まで選んで確定（${selectedCount}/${PARTY_SIZE}）</div>
       </div>
       <button type="button" class="btn btn-ghost" data-fill-close>戻る</button>
     `;
@@ -686,14 +786,11 @@ function openPartyModal(sortieId) {
       const member = createMember({ name: fillName.value });
       if (!member) return showToast('名前を入れてください');
       state.members.push(member);
-      const res = addMemberToParty(getSortie(), member.id, gi);
+      persist({ skipSync: true });
+      if (fillSelected.size < PARTY_SIZE) fillSelected.add(member.id);
+      else showToast(`選択は最大${PARTY_SIZE}人です（名簿には追加済み）`);
       fillName.value = '';
-      persist({ sortieId });
-      if (!res.ok) showToast(`パーティ${gi + 1}は満員です（最大${PARTY_SIZE}人）`);
-      if (!repaintPartyModal()) {
-        render();
-        openPartyModal(sortieId);
-      }
+      paintFillSheet();
     };
     addRow.querySelector('[data-fill-add]').addEventListener('click', doFillAdd);
     fillName.addEventListener('keydown', (e) => {
@@ -708,37 +805,64 @@ function openPartyModal(sortieId) {
     } else {
       for (const m of sorted) {
         const partyIdx = findMemberPartyIndex(live, m.id);
-        const inHere = partyIdx === gi;
-        const full = !inHere && group.length >= PARTY_SIZE;
+        const selected = fillSelected.has(m.id);
+        const full = !selected && fillSelected.size >= PARTY_SIZE;
         const row = document.createElement('button');
         row.type = 'button';
-        row.className = `member-pick${inHere ? ' is-on' : ''}${full ? ' is-disabled' : ''}`;
+        row.className = `member-pick${selected ? ' is-on' : ''}${full ? ' is-disabled' : ''}`;
         row.disabled = full;
+        const check = document.createElement('span');
+        check.className = `pick-check${selected ? ' is-on' : ''}`;
+        check.setAttribute('aria-hidden', 'true');
+        check.textContent = selected ? '✓' : '';
+        row.appendChild(check);
         row.appendChild(avatarNode(m));
         const name = document.createElement('span');
         name.className = 'name';
         name.textContent = m.name;
         const mark = document.createElement('span');
         mark.className = 'pick-mark';
-        if (inHere) mark.textContent = '外す';
-        else if (partyIdx >= 0) mark.textContent = `P${partyIdx + 1}から移動`;
-        else if (full) mark.textContent = '満員';
-        else mark.textContent = '追加';
+        if (selected) mark.textContent = '選択中';
+        else if (partyIdx >= 0 && partyIdx !== gi) mark.textContent = `P${partyIdx + 1}から`;
+        else if (full) mark.textContent = '上限';
+        else mark.textContent = '選択';
         row.append(name, mark);
         row.addEventListener('click', () => {
-          if (inHere) removeSortieMember(sortieId, m.id);
-          else placeSortieMember(sortieId, m.id, gi, { toggleIfSame: false });
+          if (selected) {
+            fillSelected.delete(m.id);
+          } else {
+            if (fillSelected.size >= PARTY_SIZE) {
+              showToast(`最大${PARTY_SIZE}人までです`);
+              return;
+            }
+            fillSelected.add(m.id);
+          }
+          paintFillSheet();
         });
         list.appendChild(row);
       }
     }
 
-    fillSheet.append(head, addRow, list);
-    requestAnimationFrame(() => fillName.focus());
+    const actions = document.createElement('div');
+    actions.className = 'party-fill-actions';
+    actions.innerHTML = `
+      <button type="button" class="btn" data-fill-clear>選択クリア</button>
+      <button type="button" class="btn btn-primary" data-fill-apply>確定（${selectedCount}/${PARTY_SIZE}）</button>
+    `;
+    actions.querySelector('[data-fill-clear]').addEventListener('click', () => {
+      fillSelected = new Set();
+      paintFillSheet();
+    });
+    actions.querySelector('[data-fill-apply]').addEventListener('click', applyFillSelection);
+
+    fillSheet.append(head, addRow, list, actions);
   };
 
   const openFillSheet = (partyIndex) => {
     fillPartyIndex = partyIndex;
+    const live = getSortie();
+    ensureParties(live);
+    fillSelected = new Set(live.parties[partyIndex] || []);
     paintFillSheet();
   };
 
@@ -888,7 +1012,7 @@ function openPartyModal(sortieId) {
     if (!member) return showToast('名前を入れてください');
     state.members.push(member);
     nameInput.value = '';
-    persist();
+    persist({ skipSync: true });
     if (!repaintPartyModal()) {
       render();
       openPartyModal(sortieId);
@@ -902,7 +1026,7 @@ function openPartyModal(sortieId) {
 
   modalEl.querySelector('[data-add-party]').addEventListener('click', () => {
     const res = addEmptyParty(getSortie());
-    persist({ sortieId });
+    persist({ skipSync: true, sortieId });
     openPartyModal._pendingFill = res.partyIndex;
     if (!repaintPartyModal()) {
       openPartyModal(sortieId);
@@ -1613,7 +1737,7 @@ function render(opts = {}) {
   top.innerHTML = `
     <div class="brand">
       <h1>出撃備忘録</h1>
-      <p>出撃予定・メンバーはこの端末に保存されます</p>
+      <p>出撃予定は共有。メンバー名簿はこの端末だけです</p>
     </div>
   `;
   const actions = document.createElement('div');
@@ -1708,10 +1832,10 @@ function render(opts = {}) {
   hint.className = 'hint schedule-hint';
   hint.textContent =
     schedFilter === 'registered'
-      ? 'この端末の出撃予定を開始時刻順に表示します。行をタップするとメンバー編集できます。'
+      ? 'みんなの出撃予定を開始時刻順に表示します。行をタップするとメンバー編集できます。'
       : weekMode === 'next'
         ? '来週のトライアルです。マップ・イベントを選び、公開済みの時間枠があればメンバー登録できます。'
-        : 'カード上部をタップしてマップ・イベントを選び、時間枠でメンバー登録。出撃予定はこの端末に保存されます。';
+        : 'カード上部をタップしてマップ・イベントを選び、時間枠でメンバー登録。出撃予定は全員で共有されます。';
 
   const trials = visibleTrials();
   const main = document.createElement('div');
@@ -1768,7 +1892,19 @@ function render(opts = {}) {
 }
 
 render();
-loadSchedule();
+(async () => {
+  try {
+    await pullBoard({ migrateLocal: true });
+  } catch (e) {
+    console.warn('[board]', e);
+    boardError = String(e.message || e);
+    boardReady = true;
+    showToast('共有ボードに接続できません（この端末のみで動作）');
+  }
+  refreshUi();
+  startBoardPolling();
+  loadSchedule();
+})();
 clearInterval(clockTimer);
 clockTimer = setInterval(() => {
   pruneExpiredSorties();
