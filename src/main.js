@@ -415,6 +415,7 @@ async function copyText(text) {
 }
 
 function closeModal({ keepParty = false } = {}) {
+  const closingParty = Boolean(partySortieId) && !keepParty;
   modal = null;
   openPartyModal._repaint = null;
   document.querySelector('.modal-backdrop')?.remove();
@@ -422,6 +423,8 @@ function closeModal({ keepParty = false } = {}) {
     partySortieId = null;
     openPartyModal._heldMemberId = null;
   }
+  // パーティ編集の結果を背面に反映（モーダル中は描き直していないため）
+  if (closingParty) render();
 }
 
 function openModal(node) {
@@ -577,9 +580,11 @@ function openDiscordImportModal() {
           }
         }
         persist();
+        const keep = partySortieId;
         closeModal({ keepParty: true });
         showToast(`${n}人を登録しました`);
-        refreshUi();
+        render();
+        if (keep) openPartyModal(keep);
       });
     } catch (e) {
       listEl.textContent = String(e.message || e);
