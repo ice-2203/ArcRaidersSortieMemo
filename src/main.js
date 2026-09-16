@@ -210,8 +210,12 @@ async function pushBoardNow() {
   boardSyncing = true;
   try {
     for (const s of state.sorties) refreshSortieRoster(s);
-    const board = await pushSharedBoard(state.sorties);
+    const board = await pushSharedBoard({
+      sorties: state.sorties,
+      members: state.members,
+    });
     state.sorties = board.sorties;
+    state.members = board.members;
     saveState(state);
     boardError = '';
   } finally {
@@ -221,14 +225,29 @@ async function pushBoardNow() {
 
 async function pullBoard({ migrateLocal = false } = {}) {
   const localSorties = Array.isArray(state.sorties) ? state.sorties.slice() : [];
+  const localMembers = Array.isArray(state.members) ? state.members.slice() : [];
   const board = await fetchSharedBoard();
-  if (migrateLocal && !(board.sorties && board.sorties.length) && localSorties.length) {
+  const boardHasSorties = Boolean(board.sorties?.length);
+  const boardHasMembers = Boolean(board.members?.length);
+
+  if (migrateLocal && !boardHasSorties && !boardHasMembers && (localSorties.length || localMembers.length)) {
     state.sorties = localSorties;
+    state.members = localMembers;
     boardReady = true;
     await pushBoardNow();
     return;
   }
+  // 出撃は共有済みだが名簿が未移行のとき、端末名簿を初回アップロード
+  if (migrateLocal && boardHasSorties && !boardHasMembers && localMembers.length) {
+    state.sorties = board.sorties;
+    state.members = localMembers;
+    boardReady = true;
+    await pushBoardNow();
+    return;
+  }
+
   state.sorties = board.sorties;
+  state.members = Array.isArray(board.members) ? board.members : [];
   saveState(state);
   boardReady = true;
   boardError = '';
@@ -802,7 +821,7 @@ function openPartyModal(sortieId) {
       const member = createMember({ name: fillName.value });
       if (!member) return showToast('名前を入れてください');
       state.members.push(member);
-      persist({ skipSync: true });
+      persist();
       if (fillSelected.size < PARTY_SIZE) fillSelected.add(member.id);
       else showToast(`選択は最大${PARTY_SIZE}人です（名簿には追加済み）`);
       fillName.value = '';
@@ -1028,12 +1047,12 @@ function openPartyModal(sortieId) {
     if (!member) return showToast('名前を入れてください');
     state.members.push(member);
     nameInput.value = '';
-    persist({ skipSync: true });
+    persist();
     if (!repaintPartyModal()) {
       render();
       openPartyModal(sortieId);
     }
-    showToast(`${member.name} を名簿に追加しました。パーティをタップして配置してください`);
+    showToast(`${member.name} を名簿に追加しました`);
   };
   modalEl.querySelector('[data-add]').addEventListener('click', doAdd);
   nameInput.addEventListener('keydown', (e) => {
@@ -1753,7 +1772,7 @@ function render(opts = {}) {
   top.innerHTML = `
     <div class="brand">
       <h1>出撃備忘録</h1>
-      <p>出撃予定は共有。メンバー名簿はこの端末だけです</p>
+      <p>出撃予定・メンバー名簿は共有されます</p>
     </div>
   `;
   const actions = document.createElement('div');

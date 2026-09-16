@@ -18,15 +18,16 @@ export async function fetchSharedBoard() {
   const json = await res.json();
   return {
     sorties: Array.isArray(json.sorties) ? json.sorties : [],
+    members: Array.isArray(json.members) ? json.members : [],
     updatedAt: Number(json.updatedAt) || 0,
   };
 }
 
-export async function pushSharedBoard(sorties) {
+export async function pushSharedBoard({ sorties, members }) {
   const res = await fetch('/api/sorties', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ sorties }),
+    body: JSON.stringify({ sorties, members }),
   });
   if (!res.ok) {
     let detail = '';
@@ -41,6 +42,7 @@ export async function pushSharedBoard(sorties) {
   const json = await res.json();
   return {
     sorties: Array.isArray(json.sorties) ? json.sorties : [],
+    members: Array.isArray(json.members) ? json.members : [],
     updatedAt: Number(json.updatedAt) || Date.now(),
   };
 }
