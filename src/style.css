@@ -2512,7 +2512,7 @@ input {
 
 .modal-party {
   position: relative;
-  width: min(880px, 100%);
+  width: min(960px, 100%);
   max-width: 100%;
   max-height: min(92vh, 820px);
   overflow-x: hidden;
@@ -2712,7 +2712,7 @@ input {
 
 .party-modal-grid {
   display: grid;
-  grid-template-columns: 1.25fr 1fr;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -2726,8 +2726,8 @@ input {
 .party-pane {
   border: 1px solid var(--border);
   border-radius: 8px;
-  /* 右を狭めて縦スクロールバーを枠右端寄りに */
-  padding: 10px 2px 10px 10px;
+  /* 右をやや確保して解除ボタンが切れないようにする */
+  padding: 10px 8px 10px 10px;
   background: rgba(255, 255, 255, 0.02);
   min-height: 180px;
   min-width: 0;
@@ -2790,13 +2790,14 @@ input {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 10px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.14);
   cursor: pointer;
   touch-action: manipulation;
   min-height: 72px;
+  min-width: 0;
   transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
 }
 
@@ -2815,12 +2816,19 @@ input {
   flex-wrap: nowrap;
   align-items: center;
   justify-content: flex-start;
-  gap: 6px 8px;
+  gap: 6px;
   font-family: var(--fmono);
   font-size: 11px;
   letter-spacing: 0.04em;
   color: var(--accent);
   pointer-events: none;
+  min-width: 0;
+}
+
+.party-group-head .party-group-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .party-group-head .party-size-seg {
@@ -2833,13 +2841,23 @@ input {
   margin-left: 0;
 }
 
+.party-group-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  pointer-events: auto;
+}
+
 .party-group-head .party-group-remove {
   pointer-events: auto;
   margin-left: 0;
   flex: 0 0 auto;
-  padding: 5px 12px;
-  min-height: 28px;
-  font-size: 0.78rem;
+  padding: 3px 8px;
+  min-height: 24px;
+  font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: #ff8f8f;
@@ -2849,11 +2867,11 @@ input {
 
 .party-group-head .party-group-discord {
   pointer-events: auto;
-  margin-left: auto;
+  margin-left: 0;
   flex: 0 0 auto;
-  padding: 5px 12px;
-  min-height: 28px;
-  font-size: 0.78rem;
+  padding: 3px 8px;
+  min-height: 24px;
+  font-size: 0.72rem;
   font-weight: 700;
 }
 

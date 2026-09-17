@@ -14,7 +14,7 @@ const SCHED_FILTER_KEY = 'arcraiders.sortieMemo.schedFilter';
 const MEMBER_FILTER_KEY = 'arcraiders.sortieMemo.memberFilter';
 const RECRUIT_FILTER_KEY = 'arcraiders.sortieMemo.recruitFilter';
 const DELETED_SORTIES_KEY = 'arcraiders.sortieMemo.deletedSorties';
-const BOARD_POLL_MS = 30000;
+const BOARD_POLL_MS = 12000;
 const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function loadWeekMode() {
@@ -1994,7 +1994,7 @@ const HELP_TOPICS = [
     title: 'Discord用コピー',
     summary: '募集文の共有',
     body: `
-      <p class="help-modal-para">各パーティの<strong>募集コピー</strong>で、そのパーティだけの募集文（日時・マップ・編成・参加者・募集枠）をコピーできます。そのまま Discord に貼り付けて使えます。</p>
+      <p class="help-modal-para">各パーティの<strong>募集</strong>ボタンで、そのパーティだけの募集文（日時・マップ・編成・参加者・募集枠）をコピーできます。そのまま Discord に貼り付けて使えます。</p>
     `,
   },
   {
@@ -2658,15 +2658,18 @@ function openPartyModal(sortieId) {
       const copyPartyBtn = document.createElement('button');
       copyPartyBtn.type = 'button';
       copyPartyBtn.className = 'btn btn-primary party-group-discord';
-      copyPartyBtn.textContent = '募集コピー';
-      copyPartyBtn.title = `パーティ${gi + 1}の募集文をDiscord用にコピー`;
+      copyPartyBtn.textContent = '募集';
+      copyPartyBtn.title = `パーティ${gi + 1}の募集文をコピー（Discord用）`;
       copyPartyBtn.setAttribute('aria-label', `パーティ${gi + 1}の募集文をコピー`);
       copyPartyBtn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         copyText(discordCopyText(getSortie(), { partyIndex: gi }));
       });
-      head.append(title, sizeSeg, copyPartyBtn, removePartyBtn);
+      const actions = document.createElement('div');
+      actions.className = 'party-group-actions';
+      actions.append(copyPartyBtn, removePartyBtn);
+      head.append(title, sizeSeg, actions);
       block.appendChild(head);
 
       const timingHost = document.createElement('div');
