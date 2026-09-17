@@ -80,6 +80,7 @@ export function createSortie(fields = {}) {
     objective: String(fields.objective || '').trim(),
     memberIds: Array.isArray(fields.memberIds) ? fields.memberIds : [],
     parties: Array.isArray(fields.parties) ? fields.parties : [[]],
+    partySize: Number(fields.partySize) === 2 ? 2 : 3,
     timingTags: Array.isArray(fields.timingTags) ? fields.timingTags : [],
     roster: fields.roster && typeof fields.roster === 'object' ? fields.roster : {},
     createdAt: Date.now(),

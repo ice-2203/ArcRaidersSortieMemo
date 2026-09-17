@@ -157,7 +157,33 @@ let clockTimer = null;
 let countdownTimer = null;
 
 const app = document.querySelector('#app');
-const PARTY_SIZE = 3;
+const DEFAULT_PARTY_SIZE = 3;
+const PARTY_SIZE_OPTIONS = [
+  { size: 2, label: 'デュオ' },
+  { size: 3, label: 'トリオ' },
+];
+
+/** @param {any} sortie */
+function partySizeOf(sortie) {
+  const n = Number(sortie?.partySize);
+  return n === 2 || n === 3 ? n : DEFAULT_PARTY_SIZE;
+}
+
+function partySizeLabel(size) {
+  return size === 2 ? 'デュオ' : 'トリオ';
+}
+
+/** 編成人数を変更。縮小時は各パーティを切り詰め */
+function setSortiePartySize(sortie, size) {
+  const next = size === 2 ? 2 : 3;
+  const before = (Array.isArray(sortie.parties) ? sortie.parties.flat() : []).length;
+  sortie.partySize = next;
+  ensureParties(sortie);
+  refreshSortieRoster(sortie);
+  sortie.updatedAt = Date.now();
+  const after = (sortie.parties || []).flat().length;
+  return { ok: true, trimmed: Math.max(0, before - after) };
+}
 
 /** 1時間枠内の出撃タイミングメモ */
 const TIMING_TAGS = [
@@ -238,14 +264,16 @@ function chunkBy(list, size) {
 /** parties: string[][] を正規化し、旧 memberIds からも移行（空パーティは残す） */
 function ensureParties(sortie) {
   if (!sortie) return [[]];
+  const size = partySizeOf(sortie);
+  sortie.partySize = size;
   if (Array.isArray(sortie.parties)) {
     sortie.parties = sortie.parties.map((p) =>
-      Array.isArray(p) ? [...new Set(p.filter(Boolean))] : []
+      (Array.isArray(p) ? [...new Set(p.filter(Boolean))] : []).slice(0, size)
     );
     if (!sortie.parties.length) sortie.parties = [[]];
   } else {
     const ids = Array.isArray(sortie.memberIds) ? sortie.memberIds.filter(Boolean) : [];
-    sortie.parties = ids.length ? chunkBy(ids, PARTY_SIZE) : [[]];
+    sortie.parties = ids.length ? chunkBy(ids, size) : [[]];
   }
   sortie.memberIds = sortie.parties.flat();
   return sortie.parties;
@@ -253,6 +281,40 @@ function ensureParties(sortie) {
 
 function partyMemberLists(sortie) {
   return ensureParties(sortie).map((ids) => ids.map((id) => memberById(id, sortie)).filter(Boolean));
+}
+
+/** 募集枠の表示ラベル（例: @1募集中） */
+function partyVacancyLabel(open) {
+  const n = Math.max(0, Number(open) || 0);
+  return n > 0 ? `@${n}募集中` : '';
+}
+
+/** タイムライン等の参加者行テキスト（title / Discord用） */
+function formatPartyGroupLine(group, size) {
+  const names = group.map((m) => m.name).join('・');
+  const open = size - group.length;
+  const vac = partyVacancyLabel(open);
+  if (!vac) return names;
+  if (!names) return vac;
+  return `${names} ${vac}`;
+}
+
+/** 参加者名＋募集バッジを親要素へ追加 */
+function appendPartyGroupLine(host, group, size) {
+  const names = group.map((m) => m.name).join('・');
+  const open = size - group.length;
+  if (names) {
+    const nameEl = document.createElement('span');
+    nameEl.className = 'slot-party-names';
+    nameEl.textContent = names;
+    host.appendChild(nameEl);
+  }
+  if (open > 0) {
+    const vac = document.createElement('span');
+    vac.className = 'slot-party-vac';
+    vac.textContent = partyVacancyLabel(open);
+    host.appendChild(vac);
+  }
 }
 
 function sortieMemberIdSet(sortie) {
@@ -322,11 +384,12 @@ async function deleteMemberFromRoster(memberId) {
 
 function addMemberToParty(sortie, memberId, partyIndex) {
   ensureParties(sortie);
+  const size = partySizeOf(sortie);
   let idx = partyIndex;
   if (idx == null || idx < 0) idx = 0;
   while (sortie.parties.length <= idx) sortie.parties.push([]);
   const alreadyHere = sortie.parties[idx].includes(memberId);
-  if (!alreadyHere && sortie.parties[idx].length >= PARTY_SIZE) {
+  if (!alreadyHere && sortie.parties[idx].length >= size) {
     return { ok: false, reason: 'full', partyIndex: idx };
   }
   // 他パーティから外してから入れる
@@ -334,7 +397,7 @@ function addMemberToParty(sortie, memberId, partyIndex) {
     i === idx ? p : p.filter((id) => id !== memberId)
   );
   if (!sortie.parties[idx].includes(memberId)) {
-    if (sortie.parties[idx].length >= PARTY_SIZE) {
+    if (sortie.parties[idx].length >= size) {
       return { ok: false, reason: 'full', partyIndex: idx };
     }
     sortie.parties[idx].push(memberId);
@@ -368,10 +431,11 @@ function compactEmptyParties(sortie, opts = {}) {
   return sortie.parties;
 }
 
-/** 指定パーティのメンバーをまとめて置き換え（最大 PARTY_SIZE） */
+/** 指定パーティのメンバーをまとめて置き換え（最大 partySize） */
 function setPartyMembers(sortie, partyIndex, memberIds) {
   ensureParties(sortie);
-  const ids = [...new Set((memberIds || []).filter(Boolean))].slice(0, PARTY_SIZE);
+  const size = partySizeOf(sortie);
+  const ids = [...new Set((memberIds || []).filter(Boolean))].slice(0, size);
   while (sortie.parties.length <= partyIndex) sortie.parties.push([]);
   sortie.parties = sortie.parties.map((p, i) =>
     i === partyIndex ? [] : p.filter((id) => !ids.includes(id))
@@ -624,6 +688,18 @@ async function pushBoardNow() {
       sorties: mergedSorties,
       members: mergedMembers,
     });
+
+    // 古い API が partySize を落とす場合に備え、送信分を戻す
+    const sentById = new Map(mergedSorties.map((s) => [String(s.id), s]));
+    if (Array.isArray(board.sorties)) {
+      board.sorties = board.sorties.map((s) => {
+        const sent = sentById.get(String(s.id));
+        if (!sent) return s;
+        const remoteSize = Number(s.partySize);
+        if (remoteSize === 2 || remoteSize === 3) return s;
+        return { ...s, partySize: partySizeOf(sent) };
+      });
+    }
 
     rememberRemoteBoard(board);
     pruneDeletedSortieTombstones(board.sorties);
@@ -1262,7 +1338,7 @@ function reconcileSortieAgainstMembers(sortie) {
       seen.add(resolved);
       next.push(resolved);
     }
-    return next.slice(0, PARTY_SIZE);
+    return next.slice(0, partySizeOf(sortie));
   });
   compactEmptyParties(sortie);
   refreshSortieRoster(sortie);
@@ -1270,15 +1346,31 @@ function reconcileSortieAgainstMembers(sortie) {
 }
 
 function applySharedBoard(board, { repairPush = false } = {}) {
+  const prevById = new Map((state.sorties || []).map((s) => [String(s.id), s]));
   state.sorties = Array.isArray(board.sorties)
     ? board.sorties
         .filter((s) => s && !deletedSortieIds.has(String(s.id)))
-        .map((s) => ({
-          ...s,
-          parties: Array.isArray(s.parties) ? s.parties.map((p) => (Array.isArray(p) ? [...p] : [])) : [[]],
-          timingTags: normalizeTimingTags(s.timingTags),
-          roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
-        }))
+        .map((s) => {
+          const prev = prevById.get(String(s.id));
+          const remoteSize = Number(s.partySize);
+          const prevSize = Number(prev?.partySize);
+          // サーバが partySize を落とす／未対応のとき、ローカルのデュオ設定を消さない
+          const partySize =
+            remoteSize === 2 || remoteSize === 3
+              ? remoteSize
+              : prevSize === 2 || prevSize === 3
+                ? prevSize
+                : DEFAULT_PARTY_SIZE;
+          return {
+            ...s,
+            parties: Array.isArray(s.parties)
+              ? s.parties.map((p) => (Array.isArray(p) ? [...p].slice(0, partySize) : []))
+              : [[]],
+            partySize,
+            timingTags: normalizeTimingTags(s.timingTags),
+            roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
+          };
+        })
     : [];
   state.members = Array.isArray(board.members)
     ? board.members.map((m) => {
@@ -1297,6 +1389,7 @@ function applySharedBoard(board, { repairPush = false } = {}) {
   }
   saveState(state);
   if (repairPush && repaired && boardReady) queueBoardPush();
+  if (modal && partySortieId) repaintPartyModal({ light: true });
   return repaired;
 }
 
@@ -1347,15 +1440,27 @@ function discordCopyText(sortie) {
   const { start, end } = Number.isFinite(startMs)
     ? fmtSlotRange(startMs, Number.isFinite(endMs) ? endMs : startMs + 3600000)
     : { start: '', end: '' };
+  const size = partySizeOf(sortie);
   const groups = partyMemberLists(sortie);
   const filled = groups.filter((g) => g.length);
   const peopleLines =
     filled.length <= 1
-      ? filled[0]?.map((m) => `@${m.name}`).join(' ') || ''
+      ? (() => {
+          const g = filled[0] || [];
+          const open = size - g.length;
+          const names = g.map((m) => `@${m.name}`).join(' ');
+          return open > 0
+            ? `${names}${names ? ' ' : ''}${partyVacancyLabel(open)}`.trim()
+            : names;
+        })()
       : groups
-          .map((g, i) =>
-            g.length ? `パーティ${i + 1}: ${g.map((m) => `@${m.name}`).join(' ')}` : null
-          )
+          .map((g, i) => {
+            if (!g.length && i > 0) return null;
+            const open = size - g.length;
+            const names = g.map((m) => `@${m.name}`).join(' ');
+            const vac = open > 0 ? ` ${partyVacancyLabel(open)}` : '';
+            return `パーティ${i + 1}（${partySizeLabel(size)}）: ${names || partyVacancyLabel(size)}${vac && names ? vac : ''}`;
+          })
           .filter(Boolean)
           .join('\n');
   return [
@@ -1364,6 +1469,7 @@ function discordCopyText(sortie) {
       .filter(Boolean)
       .join(' '),
     sortie.objective ? `「${sortie.objective}」` : '',
+    `編成: ${partySizeLabel(size)}（各${size}人）`,
     timingTagsLine(sortie),
     peopleLines,
   ]
@@ -1541,6 +1647,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   ensureParties(sortie);
+  const size = partySizeOf(sortie);
   const current = findMemberPartyIndex(sortie, memberId);
   if (current === partyIndex) {
     if (toggleIfSame) {
@@ -1554,13 +1661,13 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     return;
   }
   const target = ensureParties(sortie)[partyIndex];
-  if (target && target.length >= PARTY_SIZE && current !== partyIndex) {
-    showToast(`パーティ${partyIndex + 1}は満員です（最大${PARTY_SIZE}人）`);
+  if (target && target.length >= size && current !== partyIndex) {
+    showToast(`パーティ${partyIndex + 1}は満員です（最大${size}人・${partySizeLabel(size)}）`);
     return;
   }
   const res = addMemberToParty(sortie, memberId, partyIndex);
   if (!res.ok) {
-    showToast(`パーティ${partyIndex + 1}は満員です（最大${PARTY_SIZE}人）`);
+    showToast(`パーティ${partyIndex + 1}は満員です（最大${size}人・${partySizeLabel(size)}）`);
     return;
   }
   persist({ skipSync: true, sortieId });
@@ -1599,6 +1706,7 @@ function openPartyModal(sortieId) {
 
   const modalEl = document.createElement('div');
   modalEl.className = 'modal modal-party';
+  const initialSize = partySizeOf(sortie);
   modalEl.innerHTML = `
     <div class="party-modal-head">
       <h3>レイドメンバー</h3>
@@ -1608,10 +1716,17 @@ function openPartyModal(sortieId) {
       <div class="party-summary-title">${esc(sortie.objective || '（内容未設定）')}</div>
       <div class="party-summary-meta" data-meta></div>
       <div class="timing-tag-picker" data-timing-tags></div>
+      <div class="party-size-row">
+        <span class="party-size-row-label">編成</span>
+        <div class="seg party-size-seg" role="group" aria-label="編成人数" data-party-size-seg>
+          ${PARTY_SIZE_OPTIONS.map(
+            (o) =>
+              `<button type="button" class="seg-btn${o.size === initialSize ? ' is-on' : ''}" data-party-size="${o.size}">${o.label}</button>`
+          ).join('')}
+        </div>
+      </div>
     </div>
-    <p class="hint party-howto">
-      パーティをタップしてメンバーを選びます（各${PARTY_SIZE}人）。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。
-    </p>
+    <p class="hint party-howto" data-party-howto></p>
     <div class="party-modal-grid">
       <section class="party-pane">
         <div class="party-pane-head">
@@ -1658,7 +1773,52 @@ function openPartyModal(sortieId) {
   }
 
   const getSortie = () => state.sorties.find((s) => s.id === sortieId) || sortie;
+
+  const paintPartyHowto = () => {
+    const how = modalEl.querySelector('[data-party-howto]');
+    if (!how) return;
+    const size = partySizeOf(getSortie());
+    how.textContent = `パーティをタップしてメンバーを選びます（${partySizeLabel(size)}・各${size}人）。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。`;
+  };
+
+  const paintPartySizeSeg = () => {
+    const size = partySizeOf(getSortie());
+    modalEl.querySelectorAll('[data-party-size]').forEach((btn) => {
+      const n = Number(btn.getAttribute('data-party-size'));
+      btn.classList.toggle('is-on', n === size);
+    });
+  };
+
   paintTimingTagPicker(modalEl.querySelector('[data-timing-tags]'), getSortie());
+  paintPartyHowto();
+  paintPartySizeSeg();
+  modalEl.querySelectorAll('[data-party-size]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = Number(btn.getAttribute('data-party-size'));
+      if (next !== 2 && next !== 3) return;
+      const live = getSortie();
+      if (!live) return;
+      if (partySizeOf(live) === next) return;
+      const { trimmed } = setSortiePartySize(live, next);
+      // 先にローカル反映を確定し、同期は後追い（古いAPIに消されないよう apply 側でも保護）
+      persist({ sortieId });
+      paintPartySizeSeg();
+      paintPartyHowto();
+      if (fillPartyIndex != null) {
+        const size = partySizeOf(live);
+        if (fillSelected.size > size) {
+          fillSelected = new Set([...fillSelected].slice(0, size));
+        }
+        paintFillSheet();
+      }
+      paintParties();
+      updateMemberMarks();
+      if (trimmed) showToast(`編成を${partySizeLabel(next)}に変更（${trimmed}人を外しました）`);
+      else showToast(`編成を${partySizeLabel(next)}に変更しました`);
+    });
+  });
   const fillSheet = modalEl.querySelector('[data-fill-sheet]');
   let fillPartyIndex = null;
   /** @type {Set<string>} パーティ編集シート上の選択中メンバー */
@@ -1712,7 +1872,7 @@ function openPartyModal(sortieId) {
   const applyFillSelection = () => {
     if (fillPartyIndex == null) return;
     const gi = fillPartyIndex;
-    const count = Math.min(fillSelected.size, PARTY_SIZE);
+    const count = Math.min(fillSelected.size, partySizeOf(getSortie()));
     const live = getSortie();
     setPartyMembers(live, gi, [...fillSelected]);
     persist({ sortieId });
@@ -1721,7 +1881,7 @@ function openPartyModal(sortieId) {
       render();
       openPartyModal(sortieId);
     }
-    showToast(`パーティ${gi + 1}を更新しました（${count}/${PARTY_SIZE}）`);
+    showToast(`パーティ${gi + 1}を更新しました（${count}/${partySizeOf(getSortie())}）`);
   };
 
   const paintFillSheet = () => {
@@ -1742,7 +1902,7 @@ function openPartyModal(sortieId) {
     head.innerHTML = `
       <div>
         <div class="party-fill-title">パーティ ${gi + 1}</div>
-        <div class="hint">最大${PARTY_SIZE}人まで選んで確定（${selectedCount}/${PARTY_SIZE}）</div>
+        <div class="hint">最大${partySizeOf(getSortie())}人まで選んで確定（${selectedCount}/${partySizeOf(getSortie())}）</div>
       </div>
       <button type="button" class="btn modal-close" data-fill-close>戻る</button>
     `;
@@ -1760,8 +1920,8 @@ function openPartyModal(sortieId) {
       if (!member) return showToast('名前を入れてください');
       state.members.push(member);
       persist();
-      if (fillSelected.size < PARTY_SIZE) fillSelected.add(member.id);
-      else showToast(`選択は最大${PARTY_SIZE}人です（名簿には追加済み）`);
+      if (fillSelected.size < partySizeOf(getSortie())) fillSelected.add(member.id);
+      else showToast(`選択は最大${partySizeOf(getSortie())}人です（名簿には追加済み）`);
       fillName.value = '';
       paintFillSheet();
     };
@@ -1779,7 +1939,7 @@ function openPartyModal(sortieId) {
       for (const m of sorted) {
         const partyIdx = findMemberPartyIndex(live, m.id);
         const selected = fillSelected.has(m.id);
-        const full = !selected && fillSelected.size >= PARTY_SIZE;
+        const full = !selected && fillSelected.size >= partySizeOf(getSortie());
         const row = document.createElement('button');
         row.type = 'button';
         row.className = `member-pick${selected ? ' is-on' : ''}${full ? ' is-disabled' : ''}`;
@@ -1804,8 +1964,8 @@ function openPartyModal(sortieId) {
           if (selected) {
             fillSelected.delete(m.id);
           } else {
-            if (fillSelected.size >= PARTY_SIZE) {
-              showToast(`最大${PARTY_SIZE}人までです`);
+            if (fillSelected.size >= partySizeOf(getSortie())) {
+              showToast(`最大${partySizeOf(getSortie())}人までです`);
               return;
             }
             fillSelected.add(m.id);
@@ -1820,7 +1980,7 @@ function openPartyModal(sortieId) {
     actions.className = 'party-fill-actions';
     actions.innerHTML = `
       <button type="button" class="btn" data-fill-clear>選択クリア</button>
-      <button type="button" class="btn btn-primary" data-fill-apply>確定（${selectedCount}/${PARTY_SIZE}）</button>
+      <button type="button" class="btn btn-primary" data-fill-apply>確定（${selectedCount}/${partySizeOf(getSortie())}）</button>
     `;
     actions.querySelector('[data-fill-clear]').addEventListener('click', () => {
       fillSelected = new Set();
@@ -1835,30 +1995,34 @@ function openPartyModal(sortieId) {
     fillPartyIndex = partyIndex;
     const live = getSortie();
     ensureParties(live);
-    fillSelected = new Set(live.parties[partyIndex] || []);
+    const size = partySizeOf(live);
+    fillSelected = new Set((live.parties[partyIndex] || []).slice(0, size));
     paintFillSheet();
   };
 
   const paintParties = () => {
     const live = getSortie();
     ensureParties(live);
+    const size = partySizeOf(live);
     const partyEl = modalEl.querySelector('[data-party]');
     partyEl.replaceChildren();
     const groups = partyMemberLists(live);
     groups.forEach((group, gi) => {
+      const open = size - group.length;
       const block = document.createElement('div');
       block.className = 'party-group';
       block.tabIndex = 0;
       block.setAttribute('role', 'button');
       block.setAttribute(
         'aria-label',
-        `パーティ${gi + 1}のメンバーを編集（${group.length}/${PARTY_SIZE}）`
+        `パーティ${gi + 1}のメンバーを編集（${group.length}/${size}・${partySizeLabel(size)}）`
       );
       bindPartyDrop(block, gi);
 
       const head = document.createElement('div');
       head.className = 'party-group-head';
-      head.innerHTML = `<span>パーティ ${gi + 1}</span><span class="party-group-count">${group.length}/${PARTY_SIZE}</span>`;
+      const openLabel = open > 0 ? ` · 空き${open}` : '';
+      head.innerHTML = `<span>パーティ ${gi + 1}<span class="party-group-size">${partySizeLabel(size)}</span></span><span class="party-group-count">${group.length}/${size}${openLabel}</span>`;
       block.appendChild(head);
 
       const chips = document.createElement('div');
@@ -1866,7 +2030,7 @@ function openPartyModal(sortieId) {
       if (!group.length) {
         const empty = document.createElement('div');
         empty.className = 'party-empty';
-        empty.textContent = 'タップしてメンバー追加';
+        empty.textContent = `タップして募集（${partySizeLabel(size)}）`;
         chips.appendChild(empty);
       } else {
         for (const m of group) {
@@ -1892,6 +2056,12 @@ function openPartyModal(sortieId) {
             openFillSheet(gi);
           });
           chips.appendChild(chip);
+        }
+        if (open > 0) {
+          const vac = document.createElement('div');
+          vac.className = 'party-empty party-empty--slot';
+          vac.textContent = `空き ${open}`;
+          chips.appendChild(vac);
         }
       }
       block.appendChild(chips);
@@ -2033,6 +2203,8 @@ function openPartyModal(sortieId) {
       closeModal();
       return;
     }
+    paintPartySizeSeg();
+    paintPartyHowto();
     paintParties();
     if (opts.light) updateMemberMarks();
     else paintMembers();
@@ -2646,8 +2818,13 @@ function renderTrialCard(trial) {
       if (registered) {
         const party = document.createElement('div');
         party.className = 'slot-party';
+        const size = partySizeOf(sortie);
         const groups = partyMemberLists(sortie);
         const hasAnyone = groups.some((g) => g.length);
+        const form = document.createElement('span');
+        form.className = 'slot-party-form';
+        form.textContent = partySizeLabel(size);
+        party.appendChild(form);
         if (hasAnyone) {
           groups.forEach((group, gi) => {
             if (!group.length && groups.length === 1) return;
@@ -2661,28 +2838,22 @@ function renderTrialCard(trial) {
               row.appendChild(mark);
             }
             const names = document.createElement('span');
-            names.className = 'slot-party-names';
-            names.textContent = group.map((m) => m.name).join('・');
+            names.className = 'slot-party-line';
+            appendPartyGroupLine(names, group, size);
             names.title = groups
               .filter((g) => g.length)
-              .map((g, i) => `P${i + 1}: ${g.map((m) => m.name).join('、')}`)
+              .map((g, i) => `P${i + 1}: ${formatPartyGroupLine(g, size)}`)
               .join('\n');
             row.appendChild(names);
             party.appendChild(row);
           });
         } else {
           const none = document.createElement('span');
-          none.className = 'slot-party-empty';
-          none.textContent = '参加者なし';
+          none.className = 'slot-party-vac';
+          none.textContent = partyVacancyLabel(size);
           party.appendChild(none);
         }
         foot.appendChild(party);
-        if (ensureTimingTags(sortie).length) {
-          const timing = document.createElement('div');
-          timing.className = 'slot-timing-tags';
-          appendTimingTagEls(timing, sortie);
-          foot.appendChild(timing);
-        }
       }
       const cta = document.createElement('div');
       cta.className = 'slot-cta';
@@ -2943,12 +3114,17 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
 
   const parties = document.createElement('div');
   parties.className = 'sortie-time-parties';
+  const size = partySizeOf(sortie);
   const groups = partyMemberLists(sortie);
   const filled = groups.filter((g) => g.length);
+  const form = document.createElement('span');
+  form.className = 'slot-party-form';
+  form.textContent = partySizeLabel(size);
+  parties.appendChild(form);
   if (!filled.length) {
     const none = document.createElement('span');
-    none.className = 'slot-party-empty';
-    none.textContent = '参加者なし';
+    none.className = 'slot-party-vac';
+    none.textContent = partyVacancyLabel(size);
     parties.appendChild(none);
   } else {
     groups.forEach((group, gi) => {
@@ -2961,10 +3137,10 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
         mark.textContent = `${gi + 1}`;
         g.appendChild(mark);
       }
-      const names = document.createElement('span');
-      names.className = 'slot-party-names';
-      names.textContent = group.map((m) => m.name).join('・');
-      g.appendChild(names);
+      const line = document.createElement('span');
+      line.className = 'slot-party-line';
+      appendPartyGroupLine(line, group, size);
+      g.appendChild(line);
       parties.appendChild(g);
     });
   }
