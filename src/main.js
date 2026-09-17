@@ -182,7 +182,7 @@ const PARTY_SIZE_OPTIONS = [
   { size: 3, label: 'トリオ' },
 ];
 
-/** @param {any} sortie */
+/** レイド全体の既定編成（新規パーティ追加時の初期値・後方互換） */
 function partySizeOf(sortie) {
   const n = Number(sortie?.partySize);
   return n === 2 || n === 3 ? n : DEFAULT_PARTY_SIZE;
@@ -192,16 +192,57 @@ function partySizeLabel(size) {
   return size === 2 ? 'デュオ' : 'トリオ';
 }
 
-/** 編成人数を変更。縮小時は各パーティを切り詰め */
-function setSortiePartySize(sortie, size) {
-  const next = size === 2 ? 2 : 3;
-  const before = (Array.isArray(sortie.parties) ? sortie.parties.flat() : []).length;
-  sortie.partySize = next;
+/** パーティ単位の編成人数（未設定時はレイド既定） */
+function partySizeAt(sortie, partyIndex = 0) {
+  const n = Number(Array.isArray(sortie?.partySizes) ? sortie.partySizes[partyIndex] : NaN);
+  if (n === 2 || n === 3) return n;
+  return partySizeOf(sortie);
+}
+
+/** parties と長さを揃えた partySizes を保つ */
+function ensurePartySizes(sortie) {
+  if (!sortie) return [];
+  const parties = Array.isArray(sortie.parties) ? sortie.parties : [[]];
+  const def = partySizeOf(sortie);
+  const raw = Array.isArray(sortie.partySizes) ? sortie.partySizes : null;
+  sortie.partySizes = parties.map((_, i) => {
+    const n = Number(raw?.[i]);
+    return n === 2 || n === 3 ? n : def;
+  });
+  return sortie.partySizes;
+}
+
+/** 指定パーティの編成だけ変更。縮小時はそのパーティだけ切り詰め */
+function setPartyGroupSize(sortie, partyIndex, size) {
   ensureParties(sortie);
+  ensurePartySizes(sortie);
+  const idx = Math.max(0, Number(partyIndex) || 0);
+  while (sortie.parties.length <= idx) {
+    sortie.parties.push([]);
+    sortie.partySizes.push(partySizeOf(sortie));
+  }
+  const next = size === 2 ? 2 : 3;
+  const before = (sortie.parties[idx] || []).length;
+  sortie.partySizes[idx] = next;
+  sortie.parties[idx] = (sortie.parties[idx] || []).slice(0, next);
+  sortie.partySize = partySizeAt(sortie, 0);
+  sortie.memberIds = sortie.parties.flat();
   refreshSortieRoster(sortie);
   sortie.updatedAt = Date.now();
-  const after = (sortie.parties || []).flat().length;
-  return { ok: true, trimmed: Math.max(0, before - after) };
+  return { ok: true, trimmed: Math.max(0, before - (sortie.parties[idx]?.length || 0)) };
+}
+
+/** @deprecated 全パーティ一括。互換用に残す */
+function setSortiePartySize(sortie, size) {
+  ensureParties(sortie);
+  ensurePartySizes(sortie);
+  const next = size === 2 ? 2 : 3;
+  let trimmed = 0;
+  for (let i = 0; i < sortie.parties.length; i++) {
+    trimmed += setPartyGroupSize(sortie, i, next).trimmed;
+  }
+  sortie.partySize = next;
+  return { ok: true, trimmed };
 }
 
 /** 1時間枠内の出撃タイミングメモ */
@@ -283,17 +324,19 @@ function chunkBy(list, size) {
 /** parties: string[][] を正規化し、旧 memberIds からも移行（空パーティは残す） */
 function ensureParties(sortie) {
   if (!sortie) return [[]];
-  const size = partySizeOf(sortie);
-  sortie.partySize = size;
+  const def = partySizeOf(sortie);
   if (Array.isArray(sortie.parties)) {
     sortie.parties = sortie.parties.map((p) =>
-      (Array.isArray(p) ? [...new Set(p.filter(Boolean))] : []).slice(0, size)
+      Array.isArray(p) ? [...new Set(p.filter(Boolean))] : []
     );
     if (!sortie.parties.length) sortie.parties = [[]];
   } else {
     const ids = Array.isArray(sortie.memberIds) ? sortie.memberIds.filter(Boolean) : [];
-    sortie.parties = ids.length ? chunkBy(ids, size) : [[]];
+    sortie.parties = ids.length ? chunkBy(ids, def) : [[]];
   }
+  ensurePartySizes(sortie);
+  sortie.parties = sortie.parties.map((p, i) => p.slice(0, partySizeAt(sortie, i)));
+  sortie.partySize = def;
   sortie.memberIds = sortie.parties.flat();
   return sortie.parties;
 }
@@ -353,9 +396,8 @@ function sortieMatchesMemberFilter(sortie, selectedIds = memberFilterIds) {
 
 /** デュオ/トリオの空き枠があるか（募集中） */
 function sortieIsRecruiting(sortie) {
-  const size = partySizeOf(sortie);
   const parties = ensureParties(sortie);
-  return parties.some((p) => (Array.isArray(p) ? p.length : 0) < size);
+  return parties.some((p, i) => (Array.isArray(p) ? p.length : 0) < partySizeAt(sortie, i));
 }
 
 function findMemberPartyIndex(sortie, memberId) {
@@ -377,6 +419,10 @@ function applyMemberRename(memberId, nextName) {
   const trimmed = String(nextName || '').trim();
   if (!trimmed) return { ok: false, reason: 'empty' };
   if (trimmed === member.name) return { ok: true, unchanged: true };
+  const clash = state.members.find(
+    (m) => m.id !== memberId && memberNameKey(m.name) === memberNameKey(trimmed)
+  );
+  if (clash) return { ok: false, reason: 'duplicate', name: clash.name };
   member.name = trimmed;
   member.updatedAt = Date.now();
   persist();
@@ -410,10 +456,13 @@ async function deleteMemberFromRoster(memberId) {
 
 function addMemberToParty(sortie, memberId, partyIndex) {
   ensureParties(sortie);
-  const size = partySizeOf(sortie);
   let idx = partyIndex;
   if (idx == null || idx < 0) idx = 0;
-  while (sortie.parties.length <= idx) sortie.parties.push([]);
+  while (sortie.parties.length <= idx) {
+    sortie.parties.push([]);
+    ensurePartySizes(sortie);
+  }
+  const size = partySizeAt(sortie, idx);
   const alreadyHere = sortie.parties[idx].includes(memberId);
   if (!alreadyHere && sortie.parties[idx].length >= size) {
     return { ok: false, reason: 'full', partyIndex: idx };
@@ -441,28 +490,43 @@ function addMemberToParty(sortie, memberId, partyIndex) {
  */
 function compactEmptyParties(sortie, opts = {}) {
   if (!sortie || !Array.isArray(sortie.parties)) return [[]];
-  const parties = sortie.parties.map((p) =>
-    Array.isArray(p) ? [...new Set(p.filter(Boolean))] : []
-  );
-  const filled = parties.filter((p) => p.length > 0);
+  ensurePartySizes(sortie);
+  const pairs = sortie.parties.map((p, i) => ({
+    members: Array.isArray(p) ? [...new Set(p.filter(Boolean))] : [],
+    size: partySizeAt(sortie, i),
+  }));
+  const filled = pairs.filter((x) => x.members.length > 0);
   const keepTrailing =
     opts.keepTrailingEmpty ?? Boolean(modal && partySortieId);
+  const defSize = partySizeOf(sortie);
+  let next;
   if (keepTrailing) {
-    const wantTrailing = parties.length > 0 && parties[parties.length - 1].length === 0;
-    sortie.parties = wantTrailing ? [...filled, []] : filled.length ? filled : [[]];
+    const wantTrailing = pairs.length > 0 && pairs[pairs.length - 1].members.length === 0;
+    const trailingSize = wantTrailing ? pairs[pairs.length - 1].size : defSize;
+    next = wantTrailing
+      ? [...filled, { members: [], size: trailingSize }]
+      : filled.length
+        ? filled
+        : [{ members: [], size: defSize }];
   } else {
-    sortie.parties = filled.length ? filled : [[]];
+    next = filled.length ? filled : [{ members: [], size: defSize }];
   }
+  sortie.parties = next.map((x) => x.members);
+  sortie.partySizes = next.map((x) => (x.size === 2 ? 2 : 3));
   sortie.memberIds = sortie.parties.flat();
   return sortie.parties;
 }
 
-/** 指定パーティのメンバーをまとめて置き換え（最大 partySize） */
+/** 指定パーティのメンバーをまとめて置き換え（最大そのパーティの partySize） */
 function setPartyMembers(sortie, partyIndex, memberIds) {
   ensureParties(sortie);
-  const size = partySizeOf(sortie);
+  ensurePartySizes(sortie);
+  while (sortie.parties.length <= partyIndex) {
+    sortie.parties.push([]);
+    ensurePartySizes(sortie);
+  }
+  const size = partySizeAt(sortie, partyIndex);
   const ids = [...new Set((memberIds || []).filter(Boolean))].slice(0, size);
-  while (sortie.parties.length <= partyIndex) sortie.parties.push([]);
   sortie.parties = sortie.parties.map((p, i) =>
     i === partyIndex ? [] : p.filter((id) => !ids.includes(id))
   );
@@ -472,11 +536,13 @@ function setPartyMembers(sortie, partyIndex, memberIds) {
 
 function addEmptyParty(sortie) {
   ensureParties(sortie);
+  ensurePartySizes(sortie);
   // 末尾が空なら増やさずそこを選択
   if (sortie.parties[sortie.parties.length - 1]?.length === 0) {
     return { ok: true, partyIndex: sortie.parties.length - 1 };
   }
   sortie.parties.push([]);
+  sortie.partySizes.push(partySizeOf(sortie));
   return { ok: true, partyIndex: sortie.parties.length - 1 };
 }
 
@@ -709,21 +775,32 @@ async function pushBoardNow() {
 
     const mergedSorties = mergeSortieLists(remote.sorties, state.sorties);
     const mergedMembers = mergeMemberLists(remote.members, state.members);
+    const collapsed = collapseBoardDuplicates(mergedMembers, mergedSorties);
 
     const board = await pushSharedBoard({
-      sorties: mergedSorties,
-      members: mergedMembers,
+      sorties: collapsed.sorties,
+      members: collapsed.members,
     });
 
-    // 古い API が partySize を落とす場合に備え、送信分を戻す
-    const sentById = new Map(mergedSorties.map((s) => [String(s.id), s]));
+    // 古い API が partySize / partySizes を落とす場合に備え、送信分を戻す
+    const sentById = new Map(collapsed.sorties.map((s) => [String(s.id), s]));
     if (Array.isArray(board.sorties)) {
       board.sorties = board.sorties.map((s) => {
         const sent = sentById.get(String(s.id));
         if (!sent) return s;
         const remoteSize = Number(s.partySize);
-        if (remoteSize === 2 || remoteSize === 3) return s;
-        return { ...s, partySize: partySizeOf(sent) };
+        const hasRemoteSizes =
+          Array.isArray(s.partySizes) &&
+          s.partySizes.length &&
+          s.partySizes.every((n) => Number(n) === 2 || Number(n) === 3);
+        const next = { ...s };
+        if (!(remoteSize === 2 || remoteSize === 3)) {
+          next.partySize = partySizeOf(sent);
+        }
+        if (!hasRemoteSizes && Array.isArray(sent.partySizes)) {
+          next.partySizes = [...sent.partySizes];
+        }
+        return next;
       });
     }
 
@@ -733,7 +810,7 @@ async function pushBoardNow() {
 
     // push 中にさらにローカル変更がなければサーバ結果を反映
     if (boardLocalGen === gen) {
-      applySharedBoard(board);
+      applySharedBoard(board, { repairPush: true });
       boardPushPending = false;
     } else {
       // 新しい変更があるのでローカル一覧は維持し、削除墓石だけ同期結果に合わせる
@@ -932,6 +1009,7 @@ async function renameMemberFromRoster(memberId) {
   const res = applyMemberRename(memberId, next);
   if (!res.ok) {
     if (res.reason === 'empty') showToast('名前を入れてください');
+    else if (res.reason === 'duplicate') showToast(`「${res.name}」はすでに名簿にいます`);
     return false;
   }
   if (!res.unchanged) showToast(`「${res.name}」に変更しました`);
@@ -1331,8 +1409,116 @@ function memberById(id, sortie = null) {
   return null;
 }
 
+/** 同名判定用キー（全角半角・大文字小文字を揃える） */
 function memberNameKey(name) {
-  return String(name || '').trim().toLocaleLowerCase('ja');
+  return String(name || '')
+    .normalize('NFKC')
+    .trim()
+    .toLocaleLowerCase('ja');
+}
+
+function findMemberByName(name) {
+  const key = memberNameKey(name);
+  if (!key) return null;
+  return state.members.find((m) => memberNameKey(m.name) === key) || null;
+}
+
+function memberPreferScore(m) {
+  let score = 0;
+  if (m?.avatarUrl || m?.avatarDataUrl) score += 1e12;
+  if (m?.discordId) score += 1e11;
+  score += Number(m?.updatedAt || m?.createdAt || 0);
+  return score;
+}
+
+/**
+ * 同名メンバーを1人に統合し、パーティ内の ID も付け替える。
+ * @returns {boolean} 統合したか
+ */
+function dedupeMembersByName() {
+  const groups = new Map();
+  for (const m of state.members) {
+    const key = memberNameKey(m.name);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+  const alias = new Map();
+  const drop = new Set();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const ranked = [...group].sort((a, b) => memberPreferScore(b) - memberPreferScore(a));
+    const keeper = ranked[0];
+    for (const dup of ranked.slice(1)) {
+      alias.set(dup.id, keeper.id);
+      drop.add(dup.id);
+    }
+  }
+  if (!drop.size) return false;
+
+  state.members = state.members.filter((m) => !drop.has(m.id));
+  remapSortieParties(state.sorties, alias, new Set(state.members.map((m) => m.id)));
+  return true;
+}
+
+/** 別名マップに従ってパーティ内 ID を付け替え */
+function remapSortieParties(sorties, alias, keepIds) {
+  for (const s of sorties || []) {
+    ensureParties(s);
+    s.parties = s.parties.map((party, i) => {
+      const next = [];
+      const seen = new Set();
+      for (const id of party) {
+        const resolved = alias.get(id) || id;
+        if (!resolved || seen.has(resolved)) continue;
+        if (keepIds && !keepIds.has(resolved)) continue;
+        seen.add(resolved);
+        next.push(resolved);
+      }
+      return next.slice(0, partySizeAt(s, i));
+    });
+    compactEmptyParties(s);
+    refreshSortieRoster(s);
+    s.updatedAt = Date.now();
+  }
+}
+
+/** push 用: 名簿・出撃のコピーに対して同名統合した配列を返す */
+function collapseBoardDuplicates(members, sorties) {
+  const nextMembers = Array.isArray(members) ? members.map((m) => ({ ...m })) : [];
+  const nextSorties = Array.isArray(sorties)
+    ? sorties.map((s) => ({
+        ...s,
+        parties: Array.isArray(s.parties)
+          ? s.parties.map((p) => (Array.isArray(p) ? [...p] : []))
+          : [[]],
+        partySizes: Array.isArray(s.partySizes) ? [...s.partySizes] : undefined,
+        roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
+      }))
+    : [];
+  const groups = new Map();
+  for (const m of nextMembers) {
+    const key = memberNameKey(m.name);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+  const alias = new Map();
+  const drop = new Set();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const ranked = [...group].sort((a, b) => memberPreferScore(b) - memberPreferScore(a));
+    const keeper = ranked[0];
+    for (const dup of ranked.slice(1)) {
+      alias.set(dup.id, keeper.id);
+      drop.add(dup.id);
+    }
+  }
+  const membersOut = drop.size ? nextMembers.filter((m) => !drop.has(m.id)) : nextMembers;
+  if (alias.size) {
+    remapSortieParties(nextSorties, alias, new Set(membersOut.map((m) => m.id)));
+  }
+  return { members: membersOut, sorties: nextSorties };
 }
 
 /**
@@ -1355,7 +1541,7 @@ function reconcileSortieAgainstMembers(sortie) {
     return match ? match.id : null;
   };
   const before = JSON.stringify(sortie.parties);
-  sortie.parties = sortie.parties.map((party) => {
+  sortie.parties = sortie.parties.map((party, i) => {
     const next = [];
     const seen = new Set();
     for (const id of party) {
@@ -1364,7 +1550,7 @@ function reconcileSortieAgainstMembers(sortie) {
       seen.add(resolved);
       next.push(resolved);
     }
-    return next.slice(0, partySizeOf(sortie));
+    return next.slice(0, partySizeAt(sortie, i));
   });
   compactEmptyParties(sortie);
   refreshSortieRoster(sortie);
@@ -1387,12 +1573,23 @@ function applySharedBoard(board, { repairPush = false } = {}) {
               : prevSize === 2 || prevSize === 3
                 ? prevSize
                 : DEFAULT_PARTY_SIZE;
+          const parties = Array.isArray(s.parties)
+            ? s.parties.map((p) => (Array.isArray(p) ? [...p] : []))
+            : [[]];
+          const remoteSizes = Array.isArray(s.partySizes) ? s.partySizes : null;
+          const prevSizes = Array.isArray(prev?.partySizes) ? prev.partySizes : null;
+          const partySizes = parties.map((_, i) => {
+            const n = Number(remoteSizes?.[i]);
+            if (n === 2 || n === 3) return n;
+            const p = Number(prevSizes?.[i]);
+            if (p === 2 || p === 3) return p;
+            return partySize;
+          });
           return {
             ...s,
-            parties: Array.isArray(s.parties)
-              ? s.parties.map((p) => (Array.isArray(p) ? [...p].slice(0, partySize) : []))
-              : [[]],
+            parties: parties.map((p, i) => p.slice(0, partySizes[i])),
             partySize,
+            partySizes,
             timingTags: normalizeTimingTags(s.timingTags),
             roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
           };
@@ -1408,7 +1605,7 @@ function applySharedBoard(board, { repairPush = false } = {}) {
         };
       })
     : [];
-  let repaired = false;
+  let repaired = dedupeMembersByName();
   for (const s of state.sorties) {
     compactEmptyParties(s);
     if (reconcileSortieAgainstMembers(s)) repaired = true;
@@ -1466,13 +1663,19 @@ function discordCopyText(sortie) {
   const { start, end } = Number.isFinite(startMs)
     ? fmtSlotRange(startMs, Number.isFinite(endMs) ? endMs : startMs + 3600000)
     : { start: '', end: '' };
-  const size = partySizeOf(sortie);
   const groups = partyMemberLists(sortie);
   const filled = groups.filter((g) => g.length);
+  const sizeLabels = groups.map((_, i) => partySizeAt(sortie, i));
+  const allSameSize = sizeLabels.length > 0 && sizeLabels.every((s) => s === sizeLabels[0]);
   const peopleLines =
     filled.length <= 1
       ? (() => {
-          const g = filled[0] || [];
+          const gi = Math.max(
+            0,
+            groups.findIndex((g) => g.length)
+          );
+          const g = groups[gi] || [];
+          const size = partySizeAt(sortie, gi);
           const open = size - g.length;
           const names = g.map((m) => `@${m.name}`).join(' ');
           return open > 0
@@ -1482,6 +1685,7 @@ function discordCopyText(sortie) {
       : groups
           .map((g, i) => {
             if (!g.length && i > 0) return null;
+            const size = partySizeAt(sortie, i);
             const open = size - g.length;
             const names = g.map((m) => `@${m.name}`).join(' ');
             const vac = open > 0 ? ` ${partyVacancyLabel(open)}` : '';
@@ -1489,13 +1693,16 @@ function discordCopyText(sortie) {
           })
           .filter(Boolean)
           .join('\n');
+  const formLine = allSameSize
+    ? `編成: ${partySizeLabel(sizeLabels[0] || partySizeOf(sortie))}（各${sizeLabels[0] || partySizeOf(sortie)}人）`
+    : `編成: パーティごと（${sizeLabels.map((s, i) => `${i + 1}=${partySizeLabel(s)}`).join(' / ')}）`;
   return [
     `${datePart} ${start} - ${end}`.trim(),
     [regionLabel(sortie.regionSlug) || sortie.server, sortie.map, sortie.event]
       .filter(Boolean)
       .join(' '),
     sortie.objective ? `「${sortie.objective}」` : '',
-    `編成: ${partySizeLabel(size)}（各${size}人）`,
+    formLine,
     timingTagsLine(sortie),
     peopleLines,
   ]
@@ -1583,7 +1790,7 @@ const HELP_TOPICS = [
     body: `
       <p class="help-modal-para">メンバー画面では参加者の追加とパーティ分けができます。</p>
       <ul class="help-modal-dot-list">
-        <li><strong>デュオ／トリオ</strong> … 1パーティあたりの人数上限（2人／3人）</li>
+        <li><strong>デュオ／トリオ</strong> … パーティごとに人数上限を選べます（2人／3人）</li>
         <li>パーティ枠をタップしてメンバーを選ぶか、PCではドラッグでも移動できます</li>
         <li>名簿のアイコンで画像変更、名前変更／×で名簿の編集ができます</li>
         <li><strong>0分開始／最終便</strong> … その時間帯の入り方メモ（レイド一覧で見やすく表示）</li>
@@ -1851,7 +2058,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   ensureParties(sortie);
-  const size = partySizeOf(sortie);
+  const size = partySizeAt(sortie, partyIndex);
   const current = findMemberPartyIndex(sortie, memberId);
   if (current === partyIndex) {
     if (toggleIfSame) {
@@ -1910,7 +2117,6 @@ function openPartyModal(sortieId) {
 
   const modalEl = document.createElement('div');
   modalEl.className = 'modal modal-party';
-  const initialSize = partySizeOf(sortie);
   modalEl.innerHTML = `
     <div class="party-modal-head">
       <h3>レイドメンバー</h3>
@@ -1920,15 +2126,6 @@ function openPartyModal(sortieId) {
       <div class="party-summary-title">${esc(sortie.objective || '（内容未設定）')}</div>
       <div class="party-summary-meta" data-meta></div>
       <div class="timing-tag-picker" data-timing-tags></div>
-      <div class="party-size-row">
-        <span class="party-size-row-label">編成</span>
-        <div class="seg party-size-seg" role="group" aria-label="編成人数" data-party-size-seg>
-          ${PARTY_SIZE_OPTIONS.map(
-            (o) =>
-              `<button type="button" class="seg-btn${o.size === initialSize ? ' is-on' : ''}" data-party-size="${o.size}">${o.label}</button>`
-          ).join('')}
-        </div>
-      </div>
     </div>
     <p class="hint party-howto" data-party-howto></p>
     <div class="party-modal-grid">
@@ -1981,48 +2178,36 @@ function openPartyModal(sortieId) {
   const paintPartyHowto = () => {
     const how = modalEl.querySelector('[data-party-howto]');
     if (!how) return;
-    const size = partySizeOf(getSortie());
-    how.textContent = `パーティをタップしてメンバーを選びます（${partySizeLabel(size)}・各${size}人）。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。`;
+    how.textContent =
+      'パーティごとにデュオ／トリオを選べます。パーティをタップしてメンバーを選びます。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。';
   };
 
-  const paintPartySizeSeg = () => {
-    const size = partySizeOf(getSortie());
-    modalEl.querySelectorAll('[data-party-size]').forEach((btn) => {
-      const n = Number(btn.getAttribute('data-party-size'));
-      btn.classList.toggle('is-on', n === size);
-    });
+  const changePartyGroupSize = (partyIndex, next) => {
+    if (next !== 2 && next !== 3) return;
+    const live = getSortie();
+    if (!live) return;
+    if (partySizeAt(live, partyIndex) === next) return;
+    const { trimmed } = setPartyGroupSize(live, partyIndex, next);
+    persist({ sortieId });
+    if (fillPartyIndex === partyIndex) {
+      if (fillSelected.size > next) {
+        fillSelected = new Set([...fillSelected].slice(0, next));
+      }
+      paintFillSheet();
+    }
+    paintParties();
+    updateMemberMarks();
+    if (trimmed) {
+      showToast(
+        `パーティ${partyIndex + 1}を${partySizeLabel(next)}に変更（${trimmed}人を外しました）`
+      );
+    } else {
+      showToast(`パーティ${partyIndex + 1}を${partySizeLabel(next)}に変更しました`);
+    }
   };
 
   paintTimingTagPicker(modalEl.querySelector('[data-timing-tags]'), getSortie());
   paintPartyHowto();
-  paintPartySizeSeg();
-  modalEl.querySelectorAll('[data-party-size]').forEach((btn) => {
-    btn.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const next = Number(btn.getAttribute('data-party-size'));
-      if (next !== 2 && next !== 3) return;
-      const live = getSortie();
-      if (!live) return;
-      if (partySizeOf(live) === next) return;
-      const { trimmed } = setSortiePartySize(live, next);
-      // 先にローカル反映を確定し、同期は後追い（古いAPIに消されないよう apply 側でも保護）
-      persist({ sortieId });
-      paintPartySizeSeg();
-      paintPartyHowto();
-      if (fillPartyIndex != null) {
-        const size = partySizeOf(live);
-        if (fillSelected.size > size) {
-          fillSelected = new Set([...fillSelected].slice(0, size));
-        }
-        paintFillSheet();
-      }
-      paintParties();
-      updateMemberMarks();
-      if (trimmed) showToast(`編成を${partySizeLabel(next)}に変更（${trimmed}人を外しました）`);
-      else showToast(`編成を${partySizeLabel(next)}に変更しました`);
-    });
-  });
   const fillSheet = modalEl.querySelector('[data-fill-sheet]');
   let fillPartyIndex = null;
   /** @type {Set<string>} パーティ編集シート上の選択中メンバー */
@@ -2076,8 +2261,9 @@ function openPartyModal(sortieId) {
   const applyFillSelection = () => {
     if (fillPartyIndex == null) return;
     const gi = fillPartyIndex;
-    const count = Math.min(fillSelected.size, partySizeOf(getSortie()));
     const live = getSortie();
+    const size = partySizeAt(live, gi);
+    const count = Math.min(fillSelected.size, size);
     setPartyMembers(live, gi, [...fillSelected]);
     persist({ sortieId });
     closeFillSheet();
@@ -2085,7 +2271,7 @@ function openPartyModal(sortieId) {
       render();
       openPartyModal(sortieId);
     }
-    showToast(`パーティ${gi + 1}を更新しました（${count}/${partySizeOf(getSortie())}）`);
+    showToast(`パーティ${gi + 1}を更新しました（${count}/${size}）`);
   };
 
   const paintFillSheet = () => {
@@ -2097,20 +2283,41 @@ function openPartyModal(sortieId) {
       return;
     }
     const gi = fillPartyIndex;
+    const size = partySizeAt(live, gi);
     const selectedCount = fillSelected.size;
     fillSheet.hidden = false;
     fillSheet.replaceChildren();
 
     const head = document.createElement('div');
     head.className = 'party-fill-head';
-    head.innerHTML = `
-      <div>
-        <div class="party-fill-title">パーティ ${gi + 1}</div>
-        <div class="hint">最大${partySizeOf(getSortie())}人まで選んで確定（${selectedCount}/${partySizeOf(getSortie())}）</div>
-      </div>
-      <button type="button" class="btn modal-close" data-fill-close>戻る</button>
+    const titleWrap = document.createElement('div');
+    titleWrap.innerHTML = `
+      <div class="party-fill-title">パーティ ${gi + 1}</div>
+      <div class="hint">最大${size}人まで選んで確定（${selectedCount}/${size}）</div>
     `;
-    head.querySelector('[data-fill-close]').addEventListener('click', closeFillSheet);
+    const sizeSeg = document.createElement('div');
+    sizeSeg.className = 'seg party-size-seg party-size-seg--inline';
+    sizeSeg.setAttribute('role', 'group');
+    sizeSeg.setAttribute('aria-label', `パーティ${gi + 1}の編成人数`);
+    for (const o of PARTY_SIZE_OPTIONS) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `seg-btn${o.size === size ? ' is-on' : ''}`;
+      btn.textContent = o.label;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        changePartyGroupSize(gi, o.size);
+      });
+      sizeSeg.appendChild(btn);
+    }
+    titleWrap.appendChild(sizeSeg);
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'btn modal-close';
+    back.textContent = '戻る';
+    back.addEventListener('click', closeFillSheet);
+    head.append(titleWrap, back);
 
     const addRow = document.createElement('div');
     addRow.className = 'member-add-row';
@@ -2120,12 +2327,25 @@ function openPartyModal(sortieId) {
     `;
     const fillName = addRow.querySelector('[data-fill-name]');
     const doFillAdd = () => {
+      const existing = findMemberByName(fillName.value);
+      if (existing) {
+        showToast(`「${existing.name}」はすでに名簿にいます`);
+        if (fillSelected.size < size) fillSelected.add(existing.id);
+        paintFillSheet();
+        const el = fillSheet.querySelector('[data-fill-name]');
+        if (el) {
+          el.value = fillName.value;
+          el.focus();
+          el.select();
+        }
+        return;
+      }
       const member = createMember({ name: fillName.value });
       if (!member) return showToast('名前を入れてください');
       state.members.push(member);
       persist();
-      if (fillSelected.size < partySizeOf(getSortie())) fillSelected.add(member.id);
-      else showToast(`選択は最大${partySizeOf(getSortie())}人です（名簿には追加済み）`);
+      if (fillSelected.size < size) fillSelected.add(member.id);
+      else showToast(`選択は最大${size}人です（名簿には追加済み）`);
       fillName.value = '';
       paintFillSheet();
       fillSheet.querySelector('[data-fill-name]')?.focus();
@@ -2144,7 +2364,7 @@ function openPartyModal(sortieId) {
       for (const m of sorted) {
         const partyIdx = findMemberPartyIndex(live, m.id);
         const selected = fillSelected.has(m.id);
-        const full = !selected && fillSelected.size >= partySizeOf(getSortie());
+        const full = !selected && fillSelected.size >= size;
         const row = document.createElement('button');
         row.type = 'button';
         row.className = `member-pick${selected ? ' is-on' : ''}${full ? ' is-disabled' : ''}`;
@@ -2169,8 +2389,8 @@ function openPartyModal(sortieId) {
           if (selected) {
             fillSelected.delete(m.id);
           } else {
-            if (fillSelected.size >= partySizeOf(getSortie())) {
-              showToast(`最大${partySizeOf(getSortie())}人までです`);
+            if (fillSelected.size >= size) {
+              showToast(`最大${size}人までです`);
               return;
             }
             fillSelected.add(m.id);
@@ -2185,7 +2405,7 @@ function openPartyModal(sortieId) {
     actions.className = 'party-fill-actions';
     actions.innerHTML = `
       <button type="button" class="btn" data-fill-clear>選択クリア</button>
-      <button type="button" class="btn btn-primary" data-fill-apply>確定（${selectedCount}/${partySizeOf(getSortie())}）</button>
+      <button type="button" class="btn btn-primary" data-fill-apply>確定（${selectedCount}/${size}）</button>
     `;
     actions.querySelector('[data-fill-clear]').addEventListener('click', () => {
       fillSelected = new Set();
@@ -2200,7 +2420,7 @@ function openPartyModal(sortieId) {
     fillPartyIndex = partyIndex;
     const live = getSortie();
     ensureParties(live);
-    const size = partySizeOf(live);
+    const size = partySizeAt(live, partyIndex);
     fillSelected = new Set((live.parties[partyIndex] || []).slice(0, size));
     paintFillSheet();
   };
@@ -2208,11 +2428,11 @@ function openPartyModal(sortieId) {
   const paintParties = () => {
     const live = getSortie();
     ensureParties(live);
-    const size = partySizeOf(live);
     const partyEl = modalEl.querySelector('[data-party]');
     partyEl.replaceChildren();
     const groups = partyMemberLists(live);
     groups.forEach((group, gi) => {
+      const size = partySizeAt(live, gi);
       const open = size - group.length;
       const block = document.createElement('div');
       block.className = 'party-group';
@@ -2226,8 +2446,29 @@ function openPartyModal(sortieId) {
 
       const head = document.createElement('div');
       head.className = 'party-group-head';
-      const openLabel = open > 0 ? ` · 空き${open}` : '';
-      head.innerHTML = `<span>パーティ ${gi + 1}<span class="party-group-size">${partySizeLabel(size)}</span></span><span class="party-group-count">${group.length}/${size}${openLabel}</span>`;
+      const title = document.createElement('span');
+      title.className = 'party-group-title';
+      title.textContent = `パーティ ${gi + 1}`;
+      const sizeSeg = document.createElement('div');
+      sizeSeg.className = 'seg party-size-seg party-size-seg--compact';
+      sizeSeg.setAttribute('role', 'group');
+      sizeSeg.setAttribute('aria-label', `パーティ${gi + 1}の編成`);
+      for (const o of PARTY_SIZE_OPTIONS) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `seg-btn${o.size === size ? ' is-on' : ''}`;
+        btn.textContent = o.label;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          changePartyGroupSize(gi, o.size);
+        });
+        sizeSeg.appendChild(btn);
+      }
+      const count = document.createElement('span');
+      count.className = 'party-group-count';
+      count.textContent = `${group.length}/${size}${open > 0 ? ` · 空き${open}` : ''}`;
+      head.append(title, sizeSeg, count);
       block.appendChild(head);
 
       const chips = document.createElement('div');
@@ -2408,7 +2649,6 @@ function openPartyModal(sortieId) {
       closeModal();
       return;
     }
-    paintPartySizeSeg();
     paintPartyHowto();
     paintParties();
     if (opts.light) updateMemberMarks();
@@ -2421,6 +2661,17 @@ function openPartyModal(sortieId) {
     modal?.querySelector?.('[data-name]')?.focus();
   };
   const doAdd = () => {
+    const existing = findMemberByName(nameInput.value);
+    if (existing) {
+      showToast(`「${existing.name}」はすでに名簿にいます`);
+      queueMicrotask(() => {
+        const el = modal?.querySelector?.('[data-name]');
+        if (!el) return;
+        el.focus();
+        el.select();
+      });
+      return;
+    }
     const member = createMember({ name: nameInput.value });
     if (!member) return showToast('名前を入れてください');
     state.members.push(member);
@@ -3027,17 +3278,21 @@ function renderTrialCard(trial) {
       if (registered) {
         const party = document.createElement('div');
         party.className = 'slot-party';
-        const size = partySizeOf(sortie);
         const groups = partyMemberLists(sortie);
         const hasAnyone = groups.some((g) => g.length);
+        const sizeSet = new Set(groups.map((_, i) => partySizeAt(sortie, i)));
         const form = document.createElement('span');
         form.className = 'slot-party-form';
-        form.textContent = partySizeLabel(size);
+        form.textContent =
+          sizeSet.size === 1
+            ? partySizeLabel([...sizeSet][0])
+            : [...sizeSet].map((s) => partySizeLabel(s)).join('/');
         party.appendChild(form);
         if (hasAnyone) {
           groups.forEach((group, gi) => {
             if (!group.length && groups.length === 1) return;
             if (!group.length) return;
+            const size = partySizeAt(sortie, gi);
             const row = document.createElement('div');
             row.className = 'slot-party-group';
             if (groups.filter((g) => g.length).length > 1) {
@@ -3050,8 +3305,12 @@ function renderTrialCard(trial) {
             names.className = 'slot-party-line';
             appendPartyGroupLine(names, group, size);
             names.title = groups
-              .filter((g) => g.length)
-              .map((g, i) => `P${i + 1}: ${formatPartyGroupLine(g, size)}`)
+              .map((g, idx) =>
+                g.length
+                  ? `P${idx + 1}(${partySizeLabel(partySizeAt(sortie, idx))}): ${formatPartyGroupLine(g, partySizeAt(sortie, idx))}`
+                  : null
+              )
+              .filter(Boolean)
               .join('\n');
             row.appendChild(names);
             party.appendChild(row);
@@ -3059,7 +3318,7 @@ function renderTrialCard(trial) {
         } else {
           const none = document.createElement('span');
           none.className = 'slot-party-vac';
-          none.textContent = partyVacancyLabel(size);
+          none.textContent = partyVacancyLabel(partySizeAt(sortie, 0));
           party.appendChild(none);
         }
         foot.appendChild(party);
@@ -3323,21 +3582,25 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
 
   const parties = document.createElement('div');
   parties.className = 'sortie-time-parties';
-  const size = partySizeOf(sortie);
   const groups = partyMemberLists(sortie);
   const filled = groups.filter((g) => g.length);
+  const sizeSet = new Set(groups.map((_, i) => partySizeAt(sortie, i)));
   const form = document.createElement('span');
   form.className = 'slot-party-form';
-  form.textContent = partySizeLabel(size);
+  form.textContent =
+    sizeSet.size === 1
+      ? partySizeLabel([...sizeSet][0])
+      : [...sizeSet].map((s) => partySizeLabel(s)).join('/');
   parties.appendChild(form);
   if (!filled.length) {
     const none = document.createElement('span');
     none.className = 'slot-party-vac';
-    none.textContent = partyVacancyLabel(size);
+    none.textContent = partyVacancyLabel(partySizeAt(sortie, 0));
     parties.appendChild(none);
   } else {
     groups.forEach((group, gi) => {
       if (!group.length) return;
+      const size = partySizeAt(sortie, gi);
       const g = document.createElement('div');
       g.className = 'slot-party-group';
       if (filled.length > 1) {
@@ -3821,6 +4084,11 @@ function render(opts = {}) {
 
 render();
 (async () => {
+  if (dedupeMembersByName()) {
+    for (const s of state.sorties) reconcileSortieAgainstMembers(s);
+    saveState(state);
+    noteLocalBoardChange();
+  }
   try {
     await pullBoard({ migrateLocal: true });
   } catch (e) {

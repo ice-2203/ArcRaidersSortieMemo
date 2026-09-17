@@ -2690,6 +2690,19 @@ input {
   flex: 0 0 auto;
 }
 
+.party-size-seg--compact {
+  margin-left: auto;
+}
+
+.party-size-seg--compact .seg-btn {
+  padding: 2px 7px;
+  font-size: 0.68rem;
+}
+
+.party-size-seg--inline {
+  margin-top: 6px;
+}
+
 .party-group-size {
   margin-left: 6px;
   font-size: 10px;
@@ -2896,14 +2909,23 @@ input {
 
 .party-group-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px 8px;
   font-family: var(--fmono);
   font-size: 11px;
   letter-spacing: 0.04em;
   color: var(--accent);
   pointer-events: none;
+}
+
+.party-group-head .party-size-seg {
+  pointer-events: auto;
+}
+
+.party-group-title {
+  font-weight: 700;
 }
 
 .party-group-count {
