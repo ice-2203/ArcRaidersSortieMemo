@@ -85,6 +85,9 @@ export function createSortie(fields = {}) {
       ? fields.partySizes.map((n) => (Number(n) === 2 ? 2 : 3))
       : [Number(fields.partySize) === 2 ? 2 : 3],
     timingTags: Array.isArray(fields.timingTags) ? fields.timingTags : [],
+    partyTimingTags: Array.isArray(fields.partyTimingTags)
+      ? fields.partyTimingTags
+      : [Array.isArray(fields.timingTags) ? [...fields.timingTags] : []],
     roster: fields.roster && typeof fields.roster === 'object' ? fields.roster : {},
     createdAt: Date.now(),
     updatedAt: Date.now(),

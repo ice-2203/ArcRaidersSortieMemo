@@ -2924,6 +2924,34 @@ input {
   pointer-events: auto;
 }
 
+.party-group-timing {
+  pointer-events: auto;
+  margin: 0 0 6px;
+}
+
+.timing-tag-picker--party {
+  margin-top: 0;
+  gap: 4px 6px;
+}
+
+.timing-tag-picker--party .timing-tag-btn {
+  padding: 2px 7px;
+  font-size: 0.68rem;
+}
+
+.slot-party-timing {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.slot-party-timing .timing-tag {
+  font-size: 0.65rem;
+  padding: 1px 5px;
+}
+
 .party-group-title {
   font-weight: 700;
 }

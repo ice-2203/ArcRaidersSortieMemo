@@ -257,24 +257,73 @@ function normalizeTimingTags(raw) {
   return [...new Set(raw.map((x) => String(x || '').trim()).filter((id) => TIMING_TAG_IDS.has(id)))];
 }
 
-function ensureTimingTags(sortie) {
-  if (!sortie) return [];
-  sortie.timingTags = normalizeTimingTags(sortie.timingTags);
-  return sortie.timingTags;
-}
-
 function timingTagLabel(id) {
   return TIMING_TAGS.find((t) => t.id === id)?.label || id;
 }
 
-function timingTagsLine(sortie) {
-  return ensureTimingTags(sortie)
-    .map((id) => timingTagLabel(id))
-    .join(' / ');
+/** レイド全体タグ（表示用・旧データ互換）。実体は partyTimingTags */
+function ensureTimingTags(sortie) {
+  if (!sortie) return [];
+  ensurePartyTimingTags(sortie);
+  return normalizeTimingTags(sortie.timingTags);
 }
 
-function appendTimingTagEls(parent, sortie, { className = 'timing-tag' } = {}) {
-  for (const id of ensureTimingTags(sortie)) {
+function syncSortieTimingTagsFromParties(sortie) {
+  if (!sortie) return;
+  const all = new Set();
+  for (const tags of sortie.partyTimingTags || []) {
+    for (const id of normalizeTimingTags(tags)) all.add(id);
+  }
+  sortie.timingTags = [...all];
+}
+
+/** パーティごとの時間帯メモを parties と揃える */
+function ensurePartyTimingTags(sortie) {
+  if (!sortie) return [];
+  const parties = Array.isArray(sortie.parties) ? sortie.parties : [[]];
+  const legacy = normalizeTimingTags(sortie.timingTags);
+  const raw = Array.isArray(sortie.partyTimingTags) ? sortie.partyTimingTags : null;
+  const migrated = !raw;
+  sortie.partyTimingTags = parties.map((_, i) => {
+    if (raw && Array.isArray(raw[i])) return normalizeTimingTags(raw[i]);
+    return migrated ? [...legacy] : [];
+  });
+  syncSortieTimingTagsFromParties(sortie);
+  return sortie.partyTimingTags;
+}
+
+function timingTagsAt(sortie, partyIndex = 0) {
+  ensurePartyTimingTags(sortie);
+  return sortie.partyTimingTags[partyIndex] || [];
+}
+
+function timingTagsLineForParty(sortie, partyIndex) {
+  return timingTagsAt(sortie, partyIndex)
+    .map((id) => timingTagLabel(id))
+    .join('/');
+}
+
+function timingTagsLine(sortie) {
+  ensurePartyTimingTags(sortie);
+  const parties = Array.isArray(sortie.parties) ? sortie.parties : [[]];
+  const idxs = parties.map((p, i) => (Array.isArray(p) && p.length ? i : -1)).filter((i) => i >= 0);
+  const targets = idxs.length ? idxs : parties.map((_, i) => i);
+  if (targets.length <= 1) {
+    return timingTagsAt(sortie, targets[0] || 0)
+      .map((id) => timingTagLabel(id))
+      .join(' / ');
+  }
+  return targets
+    .map((i) => {
+      const line = timingTagsLineForParty(sortie, i);
+      return line ? `P${i + 1}:${line}` : null;
+    })
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function appendTimingTagEls(parent, tags, { className = 'timing-tag' } = {}) {
+  for (const id of normalizeTimingTags(tags)) {
     const el = document.createElement('span');
     el.className = `${className} ${className}--${id}`;
     el.textContent = timingTagLabel(id);
@@ -282,23 +331,44 @@ function appendTimingTagEls(parent, sortie, { className = 'timing-tag' } = {}) {
   }
 }
 
-function toggleTimingTag(sortie, tagId) {
+function appendSortieTimingTagEls(parent, sortie, { className = 'timing-tag' } = {}) {
+  appendTimingTagEls(parent, ensureTimingTags(sortie), { className });
+}
+
+function appendPartyTimingTagEls(parent, sortie, partyIndex, { className = 'timing-tag' } = {}) {
+  appendTimingTagEls(parent, timingTagsAt(sortie, partyIndex), { className });
+}
+
+function togglePartyTimingTag(sortie, partyIndex, tagId) {
   if (!sortie || !TIMING_TAG_IDS.has(tagId)) return;
-  const cur = ensureTimingTags(sortie);
-  sortie.timingTags = cur.includes(tagId) ? cur.filter((id) => id !== tagId) : [...cur, tagId];
+  ensurePartyTimingTags(sortie);
+  const idx = Math.max(0, Number(partyIndex) || 0);
+  while (sortie.partyTimingTags.length <= idx) sortie.partyTimingTags.push([]);
+  const cur = timingTagsAt(sortie, idx);
+  sortie.partyTimingTags[idx] = cur.includes(tagId)
+    ? cur.filter((id) => id !== tagId)
+    : [...cur, tagId];
+  syncSortieTimingTagsFromParties(sortie);
   sortie.updatedAt = Date.now();
   persist({ sortieId: sortie.id });
 }
 
-function paintTimingTagPicker(host, sortie) {
+/** @deprecated レイド全体トグル（旧UI互換） */
+function toggleTimingTag(sortie, tagId) {
+  togglePartyTimingTag(sortie, 0, tagId);
+}
+
+function paintPartyTimingTagPicker(host, sortie, partyIndex, { onChange } = {}) {
   if (!host || !sortie) return;
   host.replaceChildren();
+  host.classList.add('timing-tag-picker', 'timing-tag-picker--party');
   const label = document.createElement('span');
   label.className = 'timing-tag-picker-label';
-  label.textContent = '時間帯メモ';
+  label.textContent = '時間帯';
   host.appendChild(label);
+  const tags = timingTagsAt(sortie, partyIndex);
   for (const opt of TIMING_TAGS) {
-    const on = ensureTimingTags(sortie).includes(opt.id);
+    const on = tags.includes(opt.id);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = `timing-tag-btn timing-tag-btn--${opt.id}${on ? ' is-on' : ''}`;
@@ -306,10 +376,12 @@ function paintTimingTagPicker(host, sortie) {
     btn.title = opt.hint;
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.addEventListener('click', (e) => {
+      e.preventDefault();
       e.stopPropagation();
       const live = state.sorties.find((s) => s.id === sortie.id) || sortie;
-      toggleTimingTag(live, opt.id);
-      paintTimingTagPicker(host, live);
+      togglePartyTimingTag(live, partyIndex, opt.id);
+      paintPartyTimingTagPicker(host, live, partyIndex, { onChange });
+      onChange?.(live);
     });
     host.appendChild(btn);
   }
@@ -335,6 +407,7 @@ function ensureParties(sortie) {
     sortie.parties = ids.length ? chunkBy(ids, def) : [[]];
   }
   ensurePartySizes(sortie);
+  ensurePartyTimingTags(sortie);
   sortie.parties = sortie.parties.map((p, i) => p.slice(0, partySizeAt(sortie, i)));
   sortie.partySize = def;
   sortie.memberIds = sortie.parties.flat();
@@ -491,9 +564,11 @@ function addMemberToParty(sortie, memberId, partyIndex) {
 function compactEmptyParties(sortie, opts = {}) {
   if (!sortie || !Array.isArray(sortie.parties)) return [[]];
   ensurePartySizes(sortie);
+  ensurePartyTimingTags(sortie);
   const pairs = sortie.parties.map((p, i) => ({
     members: Array.isArray(p) ? [...new Set(p.filter(Boolean))] : [],
     size: partySizeAt(sortie, i),
+    timingTags: [...timingTagsAt(sortie, i)],
   }));
   const filled = pairs.filter((x) => x.members.length > 0);
   const keepTrailing =
@@ -503,16 +578,19 @@ function compactEmptyParties(sortie, opts = {}) {
   if (keepTrailing) {
     const wantTrailing = pairs.length > 0 && pairs[pairs.length - 1].members.length === 0;
     const trailingSize = wantTrailing ? pairs[pairs.length - 1].size : defSize;
+    const trailingTiming = wantTrailing ? pairs[pairs.length - 1].timingTags : [];
     next = wantTrailing
-      ? [...filled, { members: [], size: trailingSize }]
+      ? [...filled, { members: [], size: trailingSize, timingTags: trailingTiming }]
       : filled.length
         ? filled
-        : [{ members: [], size: defSize }];
+        : [{ members: [], size: defSize, timingTags: [] }];
   } else {
-    next = filled.length ? filled : [{ members: [], size: defSize }];
+    next = filled.length ? filled : [{ members: [], size: defSize, timingTags: [] }];
   }
   sortie.parties = next.map((x) => x.members);
   sortie.partySizes = next.map((x) => (x.size === 2 ? 2 : 3));
+  sortie.partyTimingTags = next.map((x) => normalizeTimingTags(x.timingTags));
+  syncSortieTimingTagsFromParties(sortie);
   sortie.memberIds = sortie.parties.flat();
   return sortie.parties;
 }
@@ -537,12 +615,14 @@ function setPartyMembers(sortie, partyIndex, memberIds) {
 function addEmptyParty(sortie) {
   ensureParties(sortie);
   ensurePartySizes(sortie);
+  ensurePartyTimingTags(sortie);
   // 末尾が空なら増やさずそこを選択
   if (sortie.parties[sortie.parties.length - 1]?.length === 0) {
     return { ok: true, partyIndex: sortie.parties.length - 1 };
   }
   sortie.parties.push([]);
   sortie.partySizes.push(partySizeOf(sortie));
+  sortie.partyTimingTags.push([]);
   return { ok: true, partyIndex: sortie.parties.length - 1 };
 }
 
@@ -799,6 +879,14 @@ async function pushBoardNow() {
         }
         if (!hasRemoteSizes && Array.isArray(sent.partySizes)) {
           next.partySizes = [...sent.partySizes];
+        }
+        const hasRemoteTiming =
+          Array.isArray(s.partyTimingTags) &&
+          s.partyTimingTags.length === (Array.isArray(s.parties) ? s.parties.length : 0);
+        if (!hasRemoteTiming && Array.isArray(sent.partyTimingTags)) {
+          next.partyTimingTags = sent.partyTimingTags.map((t) =>
+            Array.isArray(t) ? [...t] : []
+          );
         }
         return next;
       });
@@ -1493,6 +1581,9 @@ function collapseBoardDuplicates(members, sorties) {
           ? s.parties.map((p) => (Array.isArray(p) ? [...p] : []))
           : [[]],
         partySizes: Array.isArray(s.partySizes) ? [...s.partySizes] : undefined,
+        partyTimingTags: Array.isArray(s.partyTimingTags)
+          ? s.partyTimingTags.map((t) => (Array.isArray(t) ? [...t] : []))
+          : undefined,
         roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
       }))
     : [];
@@ -1585,12 +1676,24 @@ function applySharedBoard(board, { repairPush = false } = {}) {
             if (p === 2 || p === 3) return p;
             return partySize;
           });
+          const remoteTiming = Array.isArray(s.partyTimingTags) ? s.partyTimingTags : null;
+          const prevTiming = Array.isArray(prev?.partyTimingTags) ? prev.partyTimingTags : null;
+          const legacyTiming = normalizeTimingTags(s.timingTags?.length ? s.timingTags : prev?.timingTags);
+          const partyTimingTags = parties.map((_, i) => {
+            if (remoteTiming && Array.isArray(remoteTiming[i])) return normalizeTimingTags(remoteTiming[i]);
+            if (prevTiming && Array.isArray(prevTiming[i])) return normalizeTimingTags(prevTiming[i]);
+            return [...legacyTiming];
+          });
+          const timingTags = [
+            ...new Set(partyTimingTags.flatMap((t) => t)),
+          ];
           return {
             ...s,
             parties: parties.map((p, i) => p.slice(0, partySizes[i])),
             partySize,
             partySizes,
-            timingTags: normalizeTimingTags(s.timingTags),
+            partyTimingTags,
+            timingTags,
             roster: s.roster && typeof s.roster === 'object' ? { ...s.roster } : {},
           };
         })
@@ -1689,7 +1792,9 @@ function discordCopyText(sortie) {
             const open = size - g.length;
             const names = g.map((m) => `@${m.name}`).join(' ');
             const vac = open > 0 ? ` ${partyVacancyLabel(open)}` : '';
-            return `パーティ${i + 1}（${partySizeLabel(size)}）: ${names || partyVacancyLabel(size)}${vac && names ? vac : ''}`;
+            return `パーティ${i + 1}（${partySizeLabel(size)}${
+              timingTagsLineForParty(sortie, i) ? '・' + timingTagsLineForParty(sortie, i) : ''
+            }）: ${names || partyVacancyLabel(size)}${vac && names ? vac : ''}`;
           })
           .filter(Boolean)
           .join('\n');
@@ -1793,7 +1898,7 @@ const HELP_TOPICS = [
         <li><strong>デュオ／トリオ</strong> … パーティごとに人数上限を選べます（2人／3人）</li>
         <li>パーティ枠をタップしてメンバーを選ぶか、PCではドラッグでも移動できます</li>
         <li>名簿のアイコンで画像変更、名前変更／×で名簿の編集ができます</li>
-        <li><strong>0分開始／最終便</strong> … その時間帯の入り方メモ（レイド一覧で見やすく表示）</li>
+        <li><strong>0分開始／最終便</strong> … パーティごとの入り方メモ（レイド一覧で見やすく表示）</li>
         <li>空きがあるときは <strong>@1募集中</strong> のように表示されます</li>
       </ul>
     `,
@@ -2125,7 +2230,6 @@ function openPartyModal(sortieId) {
     <div class="party-summary">
       <div class="party-summary-title">${esc(sortie.objective || '（内容未設定）')}</div>
       <div class="party-summary-meta" data-meta></div>
-      <div class="timing-tag-picker" data-timing-tags></div>
     </div>
     <p class="hint party-howto" data-party-howto></p>
     <div class="party-modal-grid">
@@ -2179,7 +2283,7 @@ function openPartyModal(sortieId) {
     const how = modalEl.querySelector('[data-party-howto]');
     if (!how) return;
     how.textContent =
-      'パーティごとにデュオ／トリオを選べます。パーティをタップしてメンバーを選びます。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。';
+      'パーティごとにデュオ／トリオと0分開始／最終便を選べます。パーティをタップしてメンバーを選びます。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。';
   };
 
   const changePartyGroupSize = (partyIndex, next) => {
@@ -2206,7 +2310,6 @@ function openPartyModal(sortieId) {
     }
   };
 
-  paintTimingTagPicker(modalEl.querySelector('[data-timing-tags]'), getSortie());
   paintPartyHowto();
   const fillSheet = modalEl.querySelector('[data-fill-sheet]');
   let fillPartyIndex = null;
@@ -2312,6 +2415,14 @@ function openPartyModal(sortieId) {
       sizeSeg.appendChild(btn);
     }
     titleWrap.appendChild(sizeSeg);
+    const timingHost = document.createElement('div');
+    paintPartyTimingTagPicker(timingHost, live, gi, {
+      onChange: () => {
+        paintParties();
+        paintFillSheet();
+      },
+    });
+    titleWrap.appendChild(timingHost);
     const back = document.createElement('button');
     back.type = 'button';
     back.className = 'btn modal-close';
@@ -2470,6 +2581,16 @@ function openPartyModal(sortieId) {
       count.textContent = `${group.length}/${size}${open > 0 ? ` · 空き${open}` : ''}`;
       head.append(title, sizeSeg, count);
       block.appendChild(head);
+
+      const timingHost = document.createElement('div');
+      timingHost.className = 'party-group-timing';
+      paintPartyTimingTagPicker(timingHost, live, gi, {
+        onChange: () => {
+          paintParties();
+          if (fillPartyIndex === gi) paintFillSheet();
+        },
+      });
+      block.appendChild(timingHost);
 
       const chips = document.createElement('div');
       chips.className = 'party-group-chips';
@@ -3514,6 +3635,17 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
   });
 
   const timingTags = ensureTimingTags(sortie);
+  const partyGroupsEarly = partyMemberLists(sortie);
+  const timingByParty = partyGroupsEarly.map((_, i) => timingTagsAt(sortie, i));
+  const filledTimingKeys = partyGroupsEarly
+    .map((g, i) => (g.length ? timingByParty[i].slice().sort().join(',') : null))
+    .filter((k) => k != null);
+  const timingMixed = new Set(filledTimingKeys).size > 1;
+  const sharedTimingTags = timingMixed
+    ? []
+    : filledTimingKeys.length
+      ? timingByParty[partyGroupsEarly.findIndex((g) => g.length)] || []
+      : timingTags;
 
   if (!hideTime) {
     const timeCol = document.createElement('div');
@@ -3525,10 +3657,10 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     cd.className = 'sortie-time-cd';
     bindCountdownEl(cd, startMs, endMs, 'is-live');
     timeCol.append(range, cd);
-    if (timingTags.length) {
+    if (sharedTimingTags.length) {
       const timing = document.createElement('div');
       timing.className = 'sortie-time-timing-tags';
-      appendTimingTagEls(timing, sortie);
+      appendTimingTagEls(timing, sharedTimingTags);
       timeCol.appendChild(timing);
     }
     row.appendChild(timeCol);
@@ -3573,16 +3705,16 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     head.appendChild(metaLine);
   }
 
-  if (hideTime && timingTags.length) {
+  if (hideTime && sharedTimingTags.length) {
     const timing = document.createElement('div');
     timing.className = 'sortie-time-timing-tags';
-    appendTimingTagEls(timing, sortie);
+    appendTimingTagEls(timing, sharedTimingTags);
     head.appendChild(timing);
   }
 
   const parties = document.createElement('div');
   parties.className = 'sortie-time-parties';
-  const groups = partyMemberLists(sortie);
+  const groups = partyGroupsEarly;
   const filled = groups.filter((g) => g.length);
   const sizeSet = new Set(groups.map((_, i) => partySizeAt(sortie, i)));
   const form = document.createElement('span');
@@ -3613,6 +3745,12 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
       line.className = 'slot-party-line';
       appendPartyGroupLine(line, group, size);
       g.appendChild(line);
+      if (timingMixed || (hideTime && timingByParty[gi]?.length)) {
+        const tags = document.createElement('span');
+        tags.className = 'slot-party-timing';
+        appendPartyTimingTagEls(tags, sortie, gi);
+        if (tags.childNodes.length) g.appendChild(tags);
+      }
       parties.appendChild(g);
     });
   }
