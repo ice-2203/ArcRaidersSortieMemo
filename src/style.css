@@ -2855,9 +2855,9 @@ input {
   pointer-events: auto;
   margin-left: 0;
   flex: 0 0 auto;
-  padding: 3px 8px;
-  min-height: 24px;
-  font-size: 0.72rem;
+  padding: 4px 10px;
+  min-height: 26px;
+  font-size: 0.76rem;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: #ff8f8f;
@@ -2869,9 +2869,9 @@ input {
   pointer-events: auto;
   margin-left: 0;
   flex: 0 0 auto;
-  padding: 3px 8px;
-  min-height: 24px;
-  font-size: 0.72rem;
+  padding: 4px 10px;
+  min-height: 26px;
+  font-size: 0.76rem;
   font-weight: 700;
 }
 
