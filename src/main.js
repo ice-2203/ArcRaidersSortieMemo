@@ -14,6 +14,8 @@ const SCHED_FILTER_KEY = 'arcraiders.sortieMemo.schedFilter';
 const MEMBER_FILTER_KEY = 'arcraiders.sortieMemo.memberFilter';
 const RECRUIT_FILTER_KEY = 'arcraiders.sortieMemo.recruitFilter';
 const DELETED_SORTIES_KEY = 'arcraiders.sortieMemo.deletedSorties';
+const REGIONS_KEY = 'arcraiders.sortieMemo.selectedRegions';
+const EXCLUDED_SLOTS_KEY = 'arcraiders.sortieMemo.excludedSlots';
 const BOARD_POLL_MS = 12000;
 const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -77,6 +79,79 @@ function saveRecruitFilterOnly(on) {
   }
 }
 
+function loadSelectedRegions() {
+  try {
+    const raw = localStorage.getItem(REGIONS_KEY);
+    const list = raw ? JSON.parse(raw) : null;
+    if (!Array.isArray(list) || !list.length) return SERVER_REGIONS.map((r) => r.slug);
+    const valid = [...new Set(list.map(String))].filter((s) =>
+      SERVER_REGIONS.some((r) => r.slug === s)
+    );
+    return valid.length ? valid : SERVER_REGIONS.map((r) => r.slug);
+  } catch {
+    return SERVER_REGIONS.map((r) => r.slug);
+  }
+}
+
+function saveSelectedRegions(regions) {
+  try {
+    localStorage.setItem(REGIONS_KEY, JSON.stringify(regions));
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadExcludedSlotKeys() {
+  try {
+    const raw = localStorage.getItem(EXCLUDED_SLOTS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(list) ? list.map(String).filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExcludedSlotKeys(keys) {
+  try {
+    localStorage.setItem(EXCLUDED_SLOTS_KEY, JSON.stringify([...keys]));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 終了から1日以上経った除外キーを捨てる */
+function pruneExcludedSlotKeys(now = Date.now()) {
+  let dirty = false;
+  for (const key of [...excludedSlotKeys]) {
+    const start = Number(String(key).split('|')[0]);
+    if (!Number.isFinite(start) || start < now - 24 * 60 * 60 * 1000) {
+      excludedSlotKeys.delete(key);
+      dirty = true;
+    }
+  }
+  if (dirty) saveExcludedSlotKeys(excludedSlotKeys);
+}
+
+function isSlotExcluded(slot) {
+  return excludedSlotKeys.has(slotKey(slot));
+}
+
+function excludeSlot(slot) {
+  excludedSlotKeys.add(slotKey(slot));
+  saveExcludedSlotKeys(excludedSlotKeys);
+}
+
+function unexcludeSlot(slot) {
+  const key = slotKey(slot);
+  if (!excludedSlotKeys.has(key)) return false;
+  excludedSlotKeys.delete(key);
+  saveExcludedSlotKeys(excludedSlotKeys);
+  return true;
+}
+
+/** トライアルカードごとに「除外枠を表示中」か（イベントタイマー同様） */
+const trialShowExcludedPreview = Object.create(null);
+
 let state = loadState();
 if (!state.trialPrefs || typeof state.trialPrefs !== 'object') state.trialPrefs = {};
 /** @type {any[]} */
@@ -88,7 +163,10 @@ let slots = [];
 let eventIconByJa = {};
 let loadError = '';
 let loading = false;
-let selectedRegions = SERVER_REGIONS.map((r) => r.slug);
+let selectedRegions = loadSelectedRegions();
+/** スケジュール枠の除外（端末ローカル） */
+let excludedSlotKeys = loadExcludedSlotKeys();
+pruneExcludedSlotKeys();
 /** @type {'all' | 'registered'} */
 let schedFilter = loadSchedFilter();
 /** @type {'current' | 'next'} */
@@ -1815,6 +1893,128 @@ function openSlotParty(trial, slot) {
   openPartyModal(sortie.id);
 }
 
+function ensureSlotCtxRoot() {
+  let root = document.getElementById('slot-ctx-root');
+  if (root) return root;
+  root = document.createElement('div');
+  root.id = 'slot-ctx-root';
+  root.setAttribute('hidden', '');
+  root.innerHTML =
+    '<div class="slot-ctx-backdrop" data-slot-ctx-bd></div>' +
+    '<div class="slot-ctx-menu" role="menu" data-slot-ctx-menu></div>';
+  document.body.appendChild(root);
+  root.querySelector('[data-slot-ctx-bd]').addEventListener('click', () => {
+    closeSlotCtxMenu();
+    if (typeof root._resolve === 'function') {
+      const resolve = root._resolve;
+      root._resolve = null;
+      resolve(null);
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (root.hasAttribute('hidden')) return;
+    closeSlotCtxMenu();
+    if (typeof root._resolve === 'function') {
+      const resolve = root._resolve;
+      root._resolve = null;
+      resolve(null);
+    }
+  });
+  return root;
+}
+
+function closeSlotCtxMenu() {
+  const root = document.getElementById('slot-ctx-root');
+  if (root) root.setAttribute('hidden', '');
+}
+
+function positionSlotCtxMenu(menu, clientX, clientY, preferAbove) {
+  const pad = 8;
+  const mw = menu.offsetWidth || 196;
+  const mh = menu.offsetHeight || 80;
+  let left = clientX - mw / 2;
+  left = Math.max(pad, Math.min(left, window.innerWidth - mw - pad));
+  let top;
+  if (preferAbove && clientY - mh - pad >= pad) {
+    top = clientY - mh - pad;
+  } else if (clientY + mh + pad <= window.innerHeight - pad) {
+    top = clientY + pad;
+  } else {
+    top = Math.max(pad, window.innerHeight - mh - pad);
+  }
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+/** イベントタイマー同様: タップ位置に予約/除外メニュー */
+function openSlotContextMenu({ clientX, clientY, preferAbove = false, excludedPreview = false } = {}) {
+  return new Promise((resolve) => {
+    const root = ensureSlotCtxRoot();
+    const menu = root.querySelector('[data-slot-ctx-menu]');
+    if (!menu) {
+      resolve(null);
+      return;
+    }
+    if (typeof root._resolve === 'function') root._resolve(null);
+    root._resolve = resolve;
+
+    menu.replaceChildren();
+    const mkBtn = (label, action, { danger = false, primary = false } = {}) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.dataset.action = action;
+      if (danger) b.classList.add('danger');
+      if (primary) b.classList.add('is-primary');
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeSlotCtxMenu();
+        root._resolve = null;
+        resolve(action);
+      });
+      menu.appendChild(b);
+    };
+    if (excludedPreview) {
+      mkBtn('除外を解除', 'unexclude');
+    } else {
+      mkBtn('予約する', 'book', { primary: true });
+      mkBtn('除外する', 'exclude', { danger: true });
+    }
+
+    root.removeAttribute('hidden');
+    const x = Number.isFinite(clientX) ? clientX : window.innerWidth / 2;
+    const y = Number.isFinite(clientY) ? clientY : window.innerHeight / 2;
+    positionSlotCtxMenu(menu, x, y, preferAbove);
+    requestAnimationFrame(() => positionSlotCtxMenu(menu, x, y, preferAbove));
+  });
+}
+
+async function handleOpenSlotClick(trial, slot, ev, { excludedPreview = false } = {}) {
+  if (!excludedPreview && isRegisteredSlot(slot, trial.id)) {
+    openSlotParty(trial, slot);
+    return;
+  }
+  const preferAbove = ev?.pointerType === 'touch' || ev?.type === 'touchend';
+  const action = await openSlotContextMenu({
+    clientX: ev?.clientX,
+    clientY: ev?.clientY,
+    preferAbove,
+    excludedPreview,
+  });
+  if (action === 'book') {
+    openSlotParty(trial, slot);
+  } else if (action === 'exclude') {
+    excludeSlot(slot);
+    showToast('この時間枠を除外しました');
+    render();
+  } else if (action === 'unexclude') {
+    unexcludeSlot(slot);
+    showToast('除外を解除しました');
+    render();
+  }
+}
+
 function discordCopyText(sortie, { partyIndex = null } = {}) {
   const startMs = new Date(sortie.startAt).getTime();
   const endMs = new Date(sortie.endAt).getTime();
@@ -1943,7 +2143,8 @@ const HELP_TOPICS = [
       <ul class="help-modal-dot-list">
         <li>カードをタップすると、表示する<strong>マップ／イベント</strong>を選べます（すぐ反映）</li>
         <li>サーバー（NA・EU など）はツールバーのボタンで切り替えます</li>
-        <li>時間枠の<strong>予約する</strong>でレイド登録、<strong>編集</strong>でメンバー画面を開きます</li>
+        <li>時間枠をタップすると、イベントタイマー同様のメニューで<strong>予約する</strong>／<strong>除外する</strong>を選べます（除外はこの端末だけ）</li>
+        <li>予約済みの枠は<strong>編集</strong>でメンバー画面を開きます</li>
       </ul>
     `,
   },
@@ -1952,8 +2153,9 @@ const HELP_TOPICS = [
     title: 'レイドを予約する',
     summary: '時間枠の登録と編集',
     body: `
-      <p class="help-modal-para">空き枠の<strong>予約する</strong>を押すと、その時間のレイドが登録され、メンバー編集画面が開きます。</p>
+      <p class="help-modal-para">空き枠をタップすると、タップ位置にメニューが出て<strong>予約する</strong>か<strong>除外する</strong>を選べます。予約するとレイドが登録され、メンバー編集画面が開きます。</p>
       <ul class="help-modal-dot-list">
+        <li>除外した枠はカード上の<strong>除外 N 件を表示</strong>で薄く再表示でき、タップで<strong>除外を解除</strong>できます</li>
         <li>すでに予約済みの枠は青系で表示され、<strong>編集</strong>から内容を変えられます</li>
         <li>実施中の枠は緑系で強調されます</li>
         <li>不要になったら各パーティの<strong>解除</strong>で外せます（最後の1枠を解除するとレイド自体も消えます）</li>
@@ -3342,13 +3544,38 @@ function renderTrialCard(trial) {
     return card;
   }
 
+  const matching = slots.filter((slot) => slotMatchesTrialPrefs(slot, prefs));
+  const excludedForTrial = matching.filter((slot) => isSlotExcluded(slot));
+  const showExcluded =
+    schedFilter !== 'registered' && !!trialShowExcludedPreview[String(trial.id)];
+
+  let visible = matching.filter((slot) => {
+    const ex = isSlotExcluded(slot);
+    if (ex && !showExcluded) return false;
+    if (schedFilter === 'registered') return isRegisteredSlot(slot, trial.id);
+    return true;
+  });
+
+  if (excludedForTrial.length && schedFilter !== 'registered') {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'trial-sched-excluded-toggle';
+    toggle.textContent = showExcluded
+      ? '除外を隠す'
+      : `除外 ${excludedForTrial.length} 件を表示`;
+    toggle.title = showExcluded
+      ? '除外した枠を一覧から隠す'
+      : '除外した枠を薄く表示して、タップで解除できます';
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      trialShowExcludedPreview[String(trial.id)] = !showExcluded;
+      render();
+    });
+    sched.appendChild(toggle);
+  }
+
   const list = document.createElement('div');
   list.className = 'mp-time-list';
-
-  let visible = slots.filter((slot) => slotMatchesTrialPrefs(slot, prefs));
-  if (schedFilter === 'registered') {
-    visible = visible.filter((slot) => isRegisteredSlot(slot, trial.id));
-  }
 
   if (!visible.length) {
     const empty = document.createElement('div');
@@ -3364,7 +3591,9 @@ function renderTrialCard(trial) {
       empty.textContent =
         schedFilter === 'registered'
           ? 'レイド登録がありません'
-          : 'この条件では表示できる枠がありません';
+          : excludedForTrial.length
+            ? '表示する枠がありません（除外中）'
+            : 'この条件では表示できる枠がありません';
     }
     sched.appendChild(empty);
   } else {
@@ -3372,12 +3601,14 @@ function renderTrialCard(trial) {
       const remain = remainText(slot.startMs, slot.endMs);
       const sortie = findSortieForSlot(slot, trial.id);
       const registered = !!sortie;
+      const excludedPreview = isSlotExcluded(slot) && showExcluded;
       const { start, end } = fmtSlotRange(slot.startMs, slot.endMs);
       const row = document.createElement('button');
       row.type = 'button';
       row.className = 'mp-time-item';
       if (remain.kind === 'live') row.classList.add('is-live');
-      if (registered) row.classList.add('is-registered');
+      if (excludedPreview) row.classList.add('trial-sched-row--excluded-preview');
+      else if (registered) row.classList.add('is-registered');
       else row.classList.add('is-open');
 
       const row1 = document.createElement('div');
@@ -3399,6 +3630,13 @@ function renderTrialCard(trial) {
       const row2 = document.createElement('div');
       row2.className = 'trial-sched-row2';
       row2.appendChild(createSrvAbbr(slot.region));
+      if (excludedPreview) {
+        const mark = document.createElement('span');
+        mark.className = 'trial-sched-mark trial-sched-mark--exclude';
+        mark.textContent = '✖';
+        mark.setAttribute('aria-hidden', 'true');
+        row2.appendChild(mark);
+      }
       const evLine = document.createElement('div');
       evLine.className = 'trial-ev-line';
       setEventNameWithIcon(
@@ -3413,7 +3651,13 @@ function renderTrialCard(trial) {
 
       const foot = document.createElement('div');
       foot.className = 'slot-foot';
-      if (registered) {
+      if (excludedPreview) {
+        const cta = document.createElement('div');
+        cta.className = 'slot-cta';
+        cta.textContent = '除外中';
+        cta.title = 'タップして除外を解除';
+        foot.appendChild(cta);
+      } else if (registered) {
         const party = document.createElement('div');
         party.className = 'slot-party';
         const groups = partyMemberLists(sortie);
@@ -3431,13 +3675,13 @@ function renderTrialCard(trial) {
             if (!group.length && groups.length === 1) return;
             if (!group.length) return;
             const size = partySizeAt(sortie, gi);
-            const row = document.createElement('div');
-            row.className = 'slot-party-group';
+            const prow = document.createElement('div');
+            prow.className = 'slot-party-group';
             if (groups.filter((g) => g.length).length > 1) {
               const mark = document.createElement('span');
               mark.className = 'slot-party-gmark';
               mark.textContent = `${gi + 1}`;
-              row.appendChild(mark);
+              prow.appendChild(mark);
             }
             const names = document.createElement('span');
             names.className = 'slot-party-line';
@@ -3450,8 +3694,8 @@ function renderTrialCard(trial) {
               )
               .filter(Boolean)
               .join('\n');
-            row.appendChild(names);
-            party.appendChild(row);
+            prow.appendChild(names);
+            party.appendChild(prow);
           });
         } else {
           const none = document.createElement('span');
@@ -3460,20 +3704,23 @@ function renderTrialCard(trial) {
           party.appendChild(none);
         }
         foot.appendChild(party);
-      }
-      const cta = document.createElement('div');
-      cta.className = 'slot-cta';
-      if (registered) {
+        const cta = document.createElement('div');
+        cta.className = 'slot-cta';
         cta.textContent = '編集';
         cta.title = 'メンバーを編集';
+        foot.appendChild(cta);
       } else {
-        cta.textContent = '予約する';
-        cta.title = 'この時間枠でレイドを予約';
+        const cta = document.createElement('div');
+        cta.className = 'slot-cta';
+        cta.textContent = '予約 / 除外';
+        cta.title = '予約するか、一覧から除外するかを選べます';
+        foot.appendChild(cta);
       }
-      foot.appendChild(cta);
 
       row.append(row1, row2, foot);
-      row.addEventListener('click', () => openSlotParty(trial, slot));
+      row.addEventListener('click', (e) =>
+        handleOpenSlotClick(trial, slot, e, { excludedPreview })
+      );
       list.appendChild(row);
     }
     sched.appendChild(list);
@@ -4208,6 +4455,7 @@ function render(opts = {}) {
         } else {
           selectedRegions = [...selectedRegions, r.slug];
         }
+        saveSelectedRegions(selectedRegions);
         loadSchedule();
       });
       filters.appendChild(btn);

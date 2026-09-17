@@ -2455,6 +2455,115 @@ input {
   max-height: none;
 }
 
+#slot-ctx-root[hidden] {
+  display: none !important;
+}
+
+#slot-ctx-root:not([hidden]) {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  pointer-events: none;
+}
+
+.slot-ctx-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  background: transparent;
+}
+
+.slot-ctx-menu {
+  position: fixed;
+  min-width: 168px;
+  max-width: min(240px, 92vw);
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(18, 27, 38, 0.92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.slot-ctx-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.slot-ctx-menu button:hover,
+.slot-ctx-menu button:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  outline: none;
+}
+
+.slot-ctx-menu button.is-primary {
+  color: var(--accent);
+}
+
+.slot-ctx-menu button.danger {
+  color: #ff8f8f;
+}
+
+.trial-sched-excluded-toggle {
+  display: block;
+  width: calc(100% - 8px);
+  flex-shrink: 0;
+  margin: 0 8px 6px 0;
+  padding: 5px 8px;
+  border: 1px dashed var(--border2);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.14);
+  color: var(--text3);
+  font-family: var(--fmono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trial-sched-excluded-toggle:hover {
+  color: var(--text2);
+  border-color: var(--dim);
+}
+
+.mp-time-item.trial-sched-row--excluded-preview {
+  opacity: 0.48;
+  border-style: dashed;
+}
+
+.trial-sched-mark {
+  flex: 0 0 11px;
+  width: 11px;
+  font-size: 9px;
+  line-height: 1;
+  text-align: center;
+  pointer-events: none;
+}
+
+.trial-sched-mark--exclude {
+  color: rgba(255, 107, 107, 0.85);
+}
+
 .confirm-message {
   margin: 0 0 16px;
   color: var(--text2);
