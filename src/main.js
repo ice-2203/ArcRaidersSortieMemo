@@ -12,6 +12,7 @@ import { SERVER_REGIONS, regionAbbr, regionLabel, MAP_OPTIONS, EVENT_OPTIONS, ev
 const WEEK_MODE_KEY = 'arcraiders.sortieMemo.weekMode';
 const SCHED_FILTER_KEY = 'arcraiders.sortieMemo.schedFilter';
 const MEMBER_FILTER_KEY = 'arcraiders.sortieMemo.memberFilter';
+const RECRUIT_FILTER_KEY = 'arcraiders.sortieMemo.recruitFilter';
 const DELETED_SORTIES_KEY = 'arcraiders.sortieMemo.deletedSorties';
 const BOARD_POLL_MS = 30000;
 const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -60,6 +61,22 @@ function saveMemberFilterIds(ids) {
   }
 }
 
+function loadRecruitFilterOnly() {
+  try {
+    return localStorage.getItem(RECRUIT_FILTER_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function saveRecruitFilterOnly(on) {
+  try {
+    localStorage.setItem(RECRUIT_FILTER_KEY, on ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+}
+
 let state = loadState();
 if (!state.trialPrefs || typeof state.trialPrefs !== 'object') state.trialPrefs = {};
 /** @type {any[]} */
@@ -78,6 +95,8 @@ let schedFilter = loadSchedFilter();
 let weekMode = loadWeekMode();
 /** 出撃のみ表示時のメンバー絞り込み（選んだ人のいずれかが参加している出撃） */
 let memberFilterIds = loadMemberFilterIds();
+/** レイド一覧：募集枠があるものだけ表示 */
+let recruitFilterOnly = loadRecruitFilterOnly();
 /** トライアル横レールの scrollLeft（再描画で飛ばないよう保持） */
 let trialRailScrollLeft = 0;
 /** カード内予定一覧の scrollTop（trialId → 位置） */
@@ -94,7 +113,7 @@ function captureSchedScrolls() {
       if (id && list) trialSchedScrollTop.set(String(id), list.scrollTop);
     });
   }
-  const wrap = app.querySelector('.sortie-timeline-wrap');
+  const wrap = app.querySelector('.sortie-timeline');
   if (wrap) registeredTimelineScrollTop = wrap.scrollTop;
 }
 
@@ -125,7 +144,7 @@ function restoreSchedScrolls() {
       );
     });
   }
-  const wrap = app.querySelector('.sortie-timeline-wrap');
+  const wrap = app.querySelector('.sortie-timeline');
   if (wrap && registeredTimelineScrollTop > 0) {
     const apply = () => {
       wrap.scrollTop = registeredTimelineScrollTop;
@@ -330,6 +349,13 @@ function sortieMatchesMemberFilter(sortie, selectedIds = memberFilterIds) {
     if (inSortie.has(id)) return true;
   }
   return false;
+}
+
+/** デュオ/トリオの空き枠があるか（募集中） */
+function sortieIsRecruiting(sortie) {
+  const size = partySizeOf(sortie);
+  const parties = ensureParties(sortie);
+  return parties.some((p) => (Array.isArray(p) ? p.length : 0) < size);
 }
 
 function findMemberPartyIndex(sortie, memberId) {
@@ -2956,9 +2982,9 @@ function memberFilterSummaryText() {
     .filter((m) => memberFilterIds.has(m.id))
     .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
     .map((m) => m.name);
-  if (names.length === 1) return names[0];
-  if (names.length === 2) return names.join('・');
-  return `${names[0]} 他${names.length - 1}人`;
+  const who =
+    names.length === 1 ? names[0] : names.length === 2 ? names.join('・') : `${names[0]} 他${names.length - 1}人`;
+  return `メンバー: ${who}`;
 }
 
 function sortieMemberFingerprint(sortie) {
@@ -3208,7 +3234,7 @@ function renderOverlapCluster(groupItems) {
 /** 「出撃のみ」：時間順の縦一覧 */
 function renderRegisteredTimeline() {
   const root = document.createElement('div');
-  root.className = 'sortie-timeline';
+  root.className = 'sortie-timeline-shell';
 
   // 名簿に無い選択IDは落とす
   const known = new Set(state.members.map((m) => m.id));
@@ -3227,9 +3253,31 @@ function renderRegisteredTimeline() {
   openBtn.type = 'button';
   openBtn.className = `btn member-filter-open${memberFilterIds.size ? ' is-on' : ''}`;
   openBtn.textContent = memberFilterSummaryText();
-  openBtn.title = 'メンバーでレイドを絞り込み';
+  openBtn.title = memberFilterIds.size
+    ? `メンバー絞り込み中（${memberFilterIds.size}人）· タップで変更`
+    : 'メンバーでレイドを絞り込み';
+  openBtn.setAttribute(
+    'aria-label',
+    memberFilterIds.size ? `メンバー絞り込み: ${memberFilterSummaryText()}` : 'メンバーで絞り込み'
+  );
   openBtn.addEventListener('click', () => openMemberFilterModal());
   filterBar.appendChild(openBtn);
+
+  const recruitBtn = document.createElement('button');
+  recruitBtn.type = 'button';
+  recruitBtn.className = `btn member-filter-recruit${recruitFilterOnly ? ' is-on' : ''}`;
+  recruitBtn.textContent = '募集中';
+  recruitBtn.title = recruitFilterOnly
+    ? '募集中のみ表示中（クリックで解除）'
+    : '空き枠があるレイドだけ表示';
+  recruitBtn.setAttribute('aria-pressed', recruitFilterOnly ? 'true' : 'false');
+  recruitBtn.addEventListener('click', () => {
+    recruitFilterOnly = !recruitFilterOnly;
+    saveRecruitFilterOnly(recruitFilterOnly);
+    render();
+  });
+  filterBar.appendChild(recruitBtn);
+
   if (memberFilterIds.size > 0) {
     const clear = document.createElement('button');
     clear.type = 'button';
@@ -3244,6 +3292,9 @@ function renderRegisteredTimeline() {
   }
   root.appendChild(filterBar);
 
+  const scroller = document.createElement('div');
+  scroller.className = 'sortie-timeline';
+
   const list = state.sorties
     .map((s) => {
       const startMs = new Date(s.startAt).getTime();
@@ -3254,7 +3305,12 @@ function renderRegisteredTimeline() {
         endMs: Number.isFinite(endMs) ? endMs : startMs + 3600000,
       };
     })
-    .filter(({ startMs, sortie }) => !!startMs && sortieMatchesMemberFilter(sortie))
+    .filter(
+      ({ startMs, sortie }) =>
+        !!startMs &&
+        sortieMatchesMemberFilter(sortie) &&
+        (!recruitFilterOnly || sortieIsRecruiting(sortie))
+    )
     .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
 
   if (!list.length) {
@@ -3264,8 +3320,14 @@ function renderRegisteredTimeline() {
     msg.className = 'empty-sorties-msg';
     const actions = document.createElement('div');
     actions.className = 'empty-sorties-actions';
-    if (memberFilterIds.size) {
-      msg.textContent = '選択したメンバーが参加しているレイドはありません';
+    if (memberFilterIds.size || recruitFilterOnly) {
+      if (recruitFilterOnly && memberFilterIds.size) {
+        msg.textContent = '条件に合う募集中のレイドはありません';
+      } else if (recruitFilterOnly) {
+        msg.textContent = '募集中のレイドはありません';
+      } else {
+        msg.textContent = '選択したメンバーが参加しているレイドはありません';
+      }
       const clear = document.createElement('button');
       clear.type = 'button';
       clear.className = 'btn btn-primary';
@@ -3273,6 +3335,8 @@ function renderRegisteredTimeline() {
       clear.addEventListener('click', () => {
         memberFilterIds = new Set();
         saveMemberFilterIds(memberFilterIds);
+        recruitFilterOnly = false;
+        saveRecruitFilterOnly(false);
         render();
       });
       actions.appendChild(clear);
@@ -3290,7 +3354,8 @@ function renderRegisteredTimeline() {
       actions.appendChild(toAll);
     }
     empty.append(msg, actions);
-    root.appendChild(empty);
+    scroller.appendChild(empty);
+    root.appendChild(scroller);
     return root;
   }
 
@@ -3326,9 +3391,10 @@ function renderRegisteredTimeline() {
     }
 
     day.appendChild(track);
-    root.appendChild(day);
+    scroller.appendChild(day);
   }
 
+  root.appendChild(scroller);
   return root;
 }
 

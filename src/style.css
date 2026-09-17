@@ -1593,11 +1593,20 @@ input {
   flex: 1 1 0;
   min-height: 0;
   height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow: hidden;
   width: 100%;
   animation: ui-fade var(--motion) var(--motion-ease) both;
+  display: flex;
+  flex-direction: column;
+}
+
+.sortie-timeline-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  max-width: 920px;
 }
 
 .sortie-timeline {
@@ -1605,7 +1614,11 @@ input {
   flex-direction: column;
   gap: 0;
   padding: 0 2px 16px;
-  max-width: 920px;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
   animation: ui-fade-up var(--motion) var(--motion-ease) both;
 }
 
@@ -1614,8 +1627,10 @@ input {
   flex-wrap: nowrap;
   align-items: center;
   gap: 6px;
-  margin-bottom: 8px;
+  margin: 0 0 8px;
+  padding: 0 2px 2px;
   flex: 0 0 auto;
+  z-index: 4;
 }
 
 /* 横いっぱい＝名前が見やすい／タップしやすい */
@@ -1650,6 +1665,23 @@ input {
   font-weight: 600;
   letter-spacing: 0.02em;
   line-height: 1.2;
+}
+
+.member-filter-recruit {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.member-filter-recruit.is-on {
+  border-color: rgba(255, 176, 80, 0.55);
+  background: rgba(255, 122, 26, 0.16);
+  color: #ffd28a;
 }
 
 .modal-member-filter {
