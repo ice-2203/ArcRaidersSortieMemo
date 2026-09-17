@@ -1331,10 +1331,15 @@ async function editMemberAvatarFromRoster(memberId) {
 }
 
 async function removeSortieById(sortieId) {
+  const sortie = state.sorties.find((s) => s.id === sortieId);
+  const partyCount = sortie ? ensureParties(sortie).filter((p) => p.length).length : 0;
   const ok = await openConfirmModal({
-    title: 'レイドを解除',
-    message: 'このレイドを解除しますか？',
-    confirmLabel: '解除する',
+    title: 'レイド全体を解除',
+    message:
+      partyCount > 1
+        ? `このレイドの全パーティ（${partyCount}枠）を解除しますか？\n特定のパーティだけ消す場合は、各パーティの「解除」を使ってください。`
+        : 'このレイドを解除しますか？',
+    confirmLabel: '全体を解除',
     cancelLabel: 'キャンセル',
     danger: true,
   });
@@ -1375,6 +1380,62 @@ async function removeSortieById(sortieId) {
         enqueueBoardPush().catch(() => {});
       }, 15000);
     }
+  }
+  return true;
+}
+
+/** レイド内の1パーティ枠だけ解除。最後の1枠ならレイド全体解除と同じ扱い */
+async function removePartyGroupByIndex(sortieId, partyIndex) {
+  const sortie = state.sorties.find((s) => s.id === sortieId);
+  if (!sortie) return false;
+  ensureParties(sortie);
+  ensurePartySizes(sortie);
+  ensurePartyTimingTags(sortie);
+  const idx = Math.max(0, Number(partyIndex) || 0);
+  if (idx >= sortie.parties.length) return false;
+
+  const filledCount = sortie.parties.filter((p) => p.length).length;
+  const thisFilled = (sortie.parties[idx] || []).length > 0;
+  const isLastFilled = thisFilled && filledCount <= 1 && sortie.parties.length <= 1;
+
+  if (isLastFilled || sortie.parties.length <= 1) {
+    // 唯一の枠を消す＝レイド解除と同じ
+    return removeSortieById(sortieId);
+  }
+
+  const memberNames = (sortie.parties[idx] || [])
+    .map((id) => memberById(id, sortie)?.name)
+    .filter(Boolean);
+  const ok = await openConfirmModal({
+    title: `パーティ${idx + 1}を解除`,
+    message: memberNames.length
+      ? `パーティ${idx + 1}（${memberNames.join('・')}）をこのレイドから外しますか？\n他のパーティはそのまま残ります。`
+      : `パーティ${idx + 1}の枠を削除しますか？\n他のパーティはそのまま残ります。`,
+    confirmLabel: 'このパーティを解除',
+    cancelLabel: 'キャンセル',
+    danger: true,
+  });
+  if (!ok) return false;
+
+  sortie.parties = sortie.parties.filter((_, i) => i !== idx);
+  sortie.partySizes = (sortie.partySizes || []).filter((_, i) => i !== idx);
+  sortie.partyTimingTags = (sortie.partyTimingTags || []).filter((_, i) => i !== idx);
+  if (!sortie.parties.length) {
+    sortie.parties = [[]];
+    sortie.partySizes = [partySizeOf(sortie)];
+    sortie.partyTimingTags = [[]];
+  }
+  ensurePartySizes(sortie);
+  ensurePartyTimingTags(sortie);
+  compactEmptyParties(sortie, { keepTrailingEmpty: Boolean(modal && partySortieId) });
+  syncSortieTimingTagsFromParties(sortie);
+  refreshSortieRoster(sortie);
+  sortie.updatedAt = Date.now();
+  persist({ sortieId });
+  showToast(`パーティ${idx + 1}を解除しました`);
+  if (!repaintPartyModal()) {
+    render();
+    if (state.sorties.some((s) => s.id === sortieId)) openPartyModal(sortieId);
   }
   return true;
 }
@@ -1884,7 +1945,7 @@ const HELP_TOPICS = [
       <ul class="help-modal-dot-list">
         <li>すでに予約済みの枠は青系で表示され、<strong>編集</strong>から内容を変えられます</li>
         <li>実施中の枠は緑系で強調されます</li>
-        <li>不要になったらメンバー画面の<strong>レイドを解除</strong>で削除できます</li>
+        <li>不要になったら各パーティの<strong>解除</strong>、または<strong>レイド全体を解除</strong>で削除できます</li>
       </ul>
     `,
   },
@@ -1913,7 +1974,7 @@ const HELP_TOPICS = [
         <li><strong>メンバー: …</strong> … 選んだ人が1人でも参加しているレイドだけ表示</li>
         <li><strong>募集中</strong> … 空き枠があるレイドだけ表示（両方併用可）</li>
         <li>同じ時間・同じメンバーで重なる枠は<strong>重複</strong>としてまとまります</li>
-        <li>行の ⋯ メニューから編集／解除ができます</li>
+        <li>行をタップするとメンバー編集を開けます</li>
       </ul>
     `,
   },
@@ -2253,7 +2314,7 @@ function openPartyModal(sortieId) {
     </div>
     <div class="modal-actions party-modal-actions">
       <button type="button" class="btn btn-primary" data-act="copy">Discord用コピー</button>
-      <button type="button" class="btn btn-danger btn-danger-strong" data-act="remove">レイドを解除</button>
+      <button type="button" class="btn btn-danger btn-danger-strong" data-act="remove">レイド全体を解除</button>
     </div>
     <div class="party-fill-sheet" data-fill-sheet hidden></div>
   `;
@@ -2579,7 +2640,18 @@ function openPartyModal(sortieId) {
       const count = document.createElement('span');
       count.className = 'party-group-count';
       count.textContent = `${group.length}/${size}${open > 0 ? ` · 空き${open}` : ''}`;
-      head.append(title, sizeSeg, count);
+      const removePartyBtn = document.createElement('button');
+      removePartyBtn.type = 'button';
+      removePartyBtn.className = 'btn party-group-remove';
+      removePartyBtn.textContent = '解除';
+      removePartyBtn.title = `パーティ${gi + 1}だけ解除（他のパーティは残る）`;
+      removePartyBtn.setAttribute('aria-label', `パーティ${gi + 1}を解除`);
+      removePartyBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        removePartyGroupByIndex(sortieId, gi);
+      });
+      head.append(title, sizeSeg, count, removePartyBtn);
       block.appendChild(head);
 
       const timingHost = document.createElement('div');
@@ -2973,79 +3045,10 @@ function iconSvg(kind) {
       return `<svg ${base}><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/></svg>`;
     case 'act':
       return `<svg ${base}><path d="M13 2 4 14h7l-1 8 10-14h-7l0-6Z" fill="currentColor"/></svg>`;
-    case 'more':
-      return `<svg ${base} aria-hidden="true"><circle cx="12" cy="5" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="19" r="1.6" fill="currentColor"/></svg>`;
-    case 'edit':
-      return `<svg ${base} aria-hidden="true"><path d="M4 20h4l10.5-10.5-4-4L4 16v4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m13.5 5.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
-    case 'trash':
-      return `<svg ${base} aria-hidden="true"><path d="M5 7h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M9 7V5h6v2" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 7l1 12h6l1-12" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>`;
     case 'all':
     default:
       return `<svg ${base}><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><path d="M12 7v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7 12h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
   }
-}
-
-function closeAllSortieMenus(except = null) {
-  document.querySelectorAll('.sortie-row-menu').forEach((menu) => {
-    if (except && menu === except) return;
-    const toggle = menu.querySelector('.sortie-row-menu-toggle');
-    const panel = menu.querySelector('.sortie-row-menu-panel');
-    if (toggle) toggle.setAttribute('aria-expanded', 'false');
-    if (panel) panel.hidden = true;
-  });
-}
-
-function renderSortieRowMenu(sortie) {
-  const menu = document.createElement('div');
-  menu.className = 'sortie-row-menu';
-
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'sortie-row-menu-toggle';
-  toggle.setAttribute('aria-haspopup', 'menu');
-  toggle.setAttribute('aria-expanded', 'false');
-  toggle.setAttribute('aria-label', '操作メニュー');
-  toggle.title = '操作';
-  toggle.innerHTML = iconSvg('more');
-
-  const panel = document.createElement('div');
-  panel.className = 'sortie-row-menu-panel';
-  panel.setAttribute('role', 'menu');
-  panel.hidden = true;
-
-  const editBtn = document.createElement('button');
-  editBtn.type = 'button';
-  editBtn.className = 'sortie-row-menu-item';
-  editBtn.setAttribute('role', 'menuitem');
-  editBtn.innerHTML = `${iconSvg('edit')}<span>編集</span>`;
-  editBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeAllSortieMenus();
-    openPartyModal(sortie.id);
-  });
-
-  const removeBtn = document.createElement('button');
-  removeBtn.type = 'button';
-  removeBtn.className = 'sortie-row-menu-item is-danger';
-  removeBtn.setAttribute('role', 'menuitem');
-  removeBtn.innerHTML = `${iconSvg('trash')}<span>解除</span>`;
-  removeBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeAllSortieMenus();
-    removeSortieById(sortie.id);
-  });
-
-  toggle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const open = panel.hidden;
-    closeAllSortieMenus(menu);
-    panel.hidden = !open;
-    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-  });
-
-  panel.append(editBtn, removeBtn);
-  menu.append(toggle, panel);
-  return menu;
 }
 
 function renderLoadingSkeleton(kind) {
@@ -3758,10 +3761,7 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
   // 重複内も行ごとに時刻・参加者を出してまとまりを掴みやすくする
   body.append(head, parties);
 
-  const actions = document.createElement('div');
-  actions.className = 'sortie-time-actions';
-  actions.appendChild(renderSortieRowMenu(sortie));
-  row.append(body, actions);
+  row.append(body);
   row.addEventListener('click', () => openPartyModal(sortie.id));
   return row;
 }
@@ -4260,11 +4260,3 @@ clockTimer = setInterval(() => {
   if (keep && state.sorties.some((s) => s.id === keep)) openPartyModal(keep);
 }, 30000);
 tickCountdowns();
-
-document.addEventListener('click', (e) => {
-  if (e.target.closest?.('.sortie-row-menu')) return;
-  closeAllSortieMenus();
-});
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeAllSortieMenus();
-});
