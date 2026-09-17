@@ -1334,12 +1334,12 @@ async function removeSortieById(sortieId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   const partyCount = sortie ? ensureParties(sortie).filter((p) => p.length).length : 0;
   const ok = await openConfirmModal({
-    title: 'レイド全体を解除',
+    title: 'レイドを解除',
     message:
       partyCount > 1
-        ? `このレイドの全パーティ（${partyCount}枠）を解除しますか？\n特定のパーティだけ消す場合は、各パーティの「解除」を使ってください。`
+        ? `このレイドの全パーティ（${partyCount}枠）を解除しますか？`
         : 'このレイドを解除しますか？',
-    confirmLabel: '全体を解除',
+    confirmLabel: '解除する',
     cancelLabel: 'キャンセル',
     danger: true,
   });
@@ -1403,14 +1403,9 @@ async function removePartyGroupByIndex(sortieId, partyIndex) {
     return removeSortieById(sortieId);
   }
 
-  const memberNames = (sortie.parties[idx] || [])
-    .map((id) => memberById(id, sortie)?.name)
-    .filter(Boolean);
   const ok = await openConfirmModal({
     title: `パーティ${idx + 1}を解除`,
-    message: memberNames.length
-      ? `パーティ${idx + 1}（${memberNames.join('・')}）をこのレイドから外しますか？\n他のパーティはそのまま残ります。`
-      : `パーティ${idx + 1}の枠を削除しますか？\n他のパーティはそのまま残ります。`,
+    message: `パーティ${idx + 1}をこのレイドから外しますか？\n他のパーティはそのまま残ります。`,
     confirmLabel: 'このパーティを解除',
     cancelLabel: 'キャンセル',
     danger: true,
@@ -1820,14 +1815,41 @@ function openSlotParty(trial, slot) {
   openPartyModal(sortie.id);
 }
 
-function discordCopyText(sortie) {
+function discordCopyText(sortie, { partyIndex = null } = {}) {
   const startMs = new Date(sortie.startAt).getTime();
   const endMs = new Date(sortie.endAt).getTime();
   const datePart = Number.isFinite(startMs) ? fmtDateSlashWeekJa(startMs) : '';
   const { start, end } = Number.isFinite(startMs)
     ? fmtSlotRange(startMs, Number.isFinite(endMs) ? endMs : startMs + 3600000)
     : { start: '', end: '' };
+  const header = [
+    `${datePart} ${start} - ${end}`.trim(),
+    [regionLabel(sortie.regionSlug) || sortie.server, sortie.map, sortie.event]
+      .filter(Boolean)
+      .join(' '),
+    sortie.objective ? `「${sortie.objective}」` : '',
+  ].filter(Boolean);
+
   const groups = partyMemberLists(sortie);
+  const partyCount = groups.length;
+
+  if (partyIndex != null && partyIndex >= 0) {
+    const gi = Math.min(partyIndex, Math.max(0, groups.length - 1));
+    const g = groups[gi] || [];
+    const size = partySizeAt(sortie, gi);
+    const open = size - g.length;
+    const names = g.map((m) => `@${m.name}`).join(' ');
+    const timing = timingTagsLineForParty(sortie, gi);
+    const formBits = [partySizeLabel(size), timing].filter(Boolean).join('・');
+    const people =
+      open > 0
+        ? `${names}${names ? ' ' : ''}${partyVacancyLabel(open)}`.trim()
+        : names || partyVacancyLabel(size);
+    const partyLabel =
+      partyCount > 1 ? `パーティ${gi + 1}（${formBits}）` : `編成: ${formBits}（${size}人）`;
+    return [...header, partyLabel, people].filter(Boolean).join('\n');
+  }
+
   const filled = groups.filter((g) => g.length);
   const sizeLabels = groups.map((_, i) => partySizeAt(sortie, i));
   const allSameSize = sizeLabels.length > 0 && sizeLabels.every((s) => s === sizeLabels[0]);
@@ -1862,18 +1884,7 @@ function discordCopyText(sortie) {
   const formLine = allSameSize
     ? `編成: ${partySizeLabel(sizeLabels[0] || partySizeOf(sortie))}（各${sizeLabels[0] || partySizeOf(sortie)}人）`
     : `編成: パーティごと（${sizeLabels.map((s, i) => `${i + 1}=${partySizeLabel(s)}`).join(' / ')}）`;
-  return [
-    `${datePart} ${start} - ${end}`.trim(),
-    [regionLabel(sortie.regionSlug) || sortie.server, sortie.map, sortie.event]
-      .filter(Boolean)
-      .join(' '),
-    sortie.objective ? `「${sortie.objective}」` : '',
-    formLine,
-    timingTagsLine(sortie),
-    peopleLines,
-  ]
-    .filter(Boolean)
-    .join('\n');
+  return [...header, formLine, timingTagsLine(sortie), peopleLines].filter(Boolean).join('\n');
 }
 
 async function copyText(text) {
@@ -1945,7 +1956,7 @@ const HELP_TOPICS = [
       <ul class="help-modal-dot-list">
         <li>すでに予約済みの枠は青系で表示され、<strong>編集</strong>から内容を変えられます</li>
         <li>実施中の枠は緑系で強調されます</li>
-        <li>不要になったら各パーティの<strong>解除</strong>、または<strong>レイド全体を解除</strong>で削除できます</li>
+        <li>不要になったら各パーティの<strong>解除</strong>で外せます（最後の1枠を解除するとレイド自体も消えます）</li>
       </ul>
     `,
   },
@@ -1983,7 +1994,7 @@ const HELP_TOPICS = [
     title: 'Discord用コピー',
     summary: '募集文の共有',
     body: `
-      <p class="help-modal-para">メンバー画面の<strong>Discord用コピー</strong>で、日時・マップ・編成・参加者・募集枠入りのテキストをクリップボードにコピーできます。そのまま Discord の募集に貼り付けて使えます。</p>
+      <p class="help-modal-para">各パーティの<strong>募集コピー</strong>で、そのパーティだけの募集文（日時・マップ・編成・参加者・募集枠）をコピーできます。そのまま Discord に貼り付けて使えます。</p>
     `,
   },
   {
@@ -2312,10 +2323,6 @@ function openPartyModal(sortieId) {
         <div class="member-pick-list" data-members></div>
       </section>
     </div>
-    <div class="modal-actions party-modal-actions">
-      <button type="button" class="btn btn-primary" data-act="copy">Discord用コピー</button>
-      <button type="button" class="btn btn-danger btn-danger-strong" data-act="remove">レイド全体を解除</button>
-    </div>
     <div class="party-fill-sheet" data-fill-sheet hidden></div>
   `;
 
@@ -2637,9 +2644,6 @@ function openPartyModal(sortieId) {
         });
         sizeSeg.appendChild(btn);
       }
-      const count = document.createElement('span');
-      count.className = 'party-group-count';
-      count.textContent = `${group.length}/${size}${open > 0 ? ` · 空き${open}` : ''}`;
       const removePartyBtn = document.createElement('button');
       removePartyBtn.type = 'button';
       removePartyBtn.className = 'btn party-group-remove';
@@ -2651,7 +2655,18 @@ function openPartyModal(sortieId) {
         e.stopPropagation();
         removePartyGroupByIndex(sortieId, gi);
       });
-      head.append(title, sizeSeg, count, removePartyBtn);
+      const copyPartyBtn = document.createElement('button');
+      copyPartyBtn.type = 'button';
+      copyPartyBtn.className = 'btn btn-primary party-group-discord';
+      copyPartyBtn.textContent = '募集コピー';
+      copyPartyBtn.title = `パーティ${gi + 1}の募集文をDiscord用にコピー`;
+      copyPartyBtn.setAttribute('aria-label', `パーティ${gi + 1}の募集文をコピー`);
+      copyPartyBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        copyText(discordCopyText(getSortie(), { partyIndex: gi }));
+      });
+      head.append(title, sizeSeg, copyPartyBtn, removePartyBtn);
       block.appendChild(head);
 
       const timingHost = document.createElement('div');
@@ -2697,10 +2712,12 @@ function openPartyModal(sortieId) {
           chips.appendChild(chip);
         }
         if (open > 0) {
-          const vac = document.createElement('div');
-          vac.className = 'party-empty party-empty--slot';
-          vac.textContent = `空き ${open}`;
-          chips.appendChild(vac);
+          for (let i = 0; i < open; i++) {
+            const vac = document.createElement('div');
+            vac.className = 'party-empty party-empty--slot';
+            vac.textContent = '空き 1';
+            chips.appendChild(vac);
+          }
         }
       }
       block.appendChild(chips);
@@ -2898,12 +2915,6 @@ function openPartyModal(sortieId) {
   });
 
   modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
-  modalEl.querySelector('[data-act="copy"]').addEventListener('click', () => {
-    copyText(discordCopyText(getSortie()));
-  });
-  modalEl.querySelector('[data-act="remove"]').addEventListener('click', () => {
-    removeSortieById(sortieId);
-  });
 
   backdrop.appendChild(modalEl);
   openModal(backdrop);
