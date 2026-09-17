@@ -2821,7 +2821,7 @@ input {
 
 .party-modal-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(200px, 1fr);
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -3076,9 +3076,9 @@ input {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   text-align: left;
-  padding: 6px 8px;
+  padding: 6px 6px;
   min-height: 48px;
   border-radius: 8px;
   border: 1px solid transparent;
@@ -3087,6 +3087,8 @@ input {
   cursor: grab;
   touch-action: manipulation;
   user-select: none;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .member-pick-avatar {
@@ -3114,25 +3116,29 @@ input {
   color: inherit;
   font: inherit;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 3px;
+  flex: 1 1 auto;
   min-width: 0;
-  padding: 4px 0;
+  padding: 2px 0;
   cursor: pointer;
   text-align: left;
 }
 
 .member-pick-more {
   display: flex;
+  flex-direction: row;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px;
-  flex-shrink: 0;
+  flex: 0 0 auto;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .member-pick-more {
-    opacity: 0.55;
+    opacity: 0.7;
   }
   .member-pick:hover .member-pick-more,
   .member-pick:focus-within .member-pick-more {
@@ -3146,11 +3152,11 @@ input {
   background: transparent;
   color: var(--text3);
   cursor: pointer;
-  min-width: 32px;
-  height: 32px;
-  padding: 0 8px;
-  border-radius: 6px;
-  font-size: 0.72rem;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
   font-weight: 600;
   letter-spacing: 0.02em;
   line-height: 1;
@@ -3161,8 +3167,10 @@ input {
 }
 
 .member-pick-icon-btn.is-danger {
-  font-size: 1.05rem;
+  font-size: 0.95rem;
   font-weight: 400;
+  min-width: 28px;
+  padding: 0 4px;
 }
 
 .member-pick-icon-btn:hover {
@@ -3236,9 +3244,12 @@ input {
 }
 
 .member-pick .name {
-  flex: 1;
+  display: block;
+  width: 100%;
   min-width: 0;
-  font-size: 0.9rem;
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.25;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3246,15 +3257,19 @@ input {
 
 .member-pick .pick-mark {
   font-family: var(--fmono);
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--text3);
   flex-shrink: 0;
-  padding: 2px 7px;
+  max-width: 100%;
+  padding: 1px 6px;
   border-radius: 999px;
   border: 1px solid var(--border2);
   background: rgba(255, 255, 255, 0.03);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .member-pick .pick-mark.is-placed {

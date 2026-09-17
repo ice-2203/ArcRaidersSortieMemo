@@ -2992,9 +2992,9 @@ function openPartyModal(sortieId) {
       const rename = document.createElement('button');
       rename.type = 'button';
       rename.className = 'member-pick-icon-btn';
-      rename.setAttribute('aria-label', `${m.name}の名前を変更`);
-      rename.title = '名前を変更';
       rename.textContent = '名前変更';
+      rename.title = '名前を変更';
+      rename.setAttribute('aria-label', `${m.name}の名前を変更`);
       rename.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!(await renameMemberFromRoster(m.id))) return;
