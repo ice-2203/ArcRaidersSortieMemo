@@ -934,6 +934,11 @@ async function pushBoardNow() {
     const mergedSorties = mergeSortieLists(remote.sorties, state.sorties);
     const mergedMembers = mergeMemberLists(remote.members, state.members);
     const collapsed = collapseBoardDuplicates(mergedMembers, mergedSorties);
+    for (const id of collapsed.droppedSortieIds || []) markSortieDeleted(id);
+    if (collapsed.droppedSortieIds?.length) {
+      state.sorties = collapsed.sorties;
+      saveState(state);
+    }
 
     const board = await pushSharedBoard({
       sorties: collapsed.sorties,
@@ -1705,7 +1710,7 @@ function remapSortieParties(sorties, alias, keepIds) {
   }
 }
 
-/** push 用: 名簿・出撃のコピーに対して同名統合した配列を返す */
+/** push 用: 名簿・出撃のコピーに対して同名・同一枠の重複を統合した配列を返す */
 function collapseBoardDuplicates(members, sorties) {
   const nextMembers = Array.isArray(members) ? members.map((m) => ({ ...m })) : [];
   const nextSorties = Array.isArray(sorties)
@@ -1743,7 +1748,126 @@ function collapseBoardDuplicates(members, sorties) {
   if (alias.size) {
     remapSortieParties(nextSorties, alias, new Set(membersOut.map((m) => m.id)));
   }
-  return { members: membersOut, sorties: nextSorties };
+  const { sorties: sortiesOut, droppedIds } = collapseDuplicateSorties(nextSorties, { mutate: true });
+  return { members: membersOut, sorties: sortiesOut, droppedSortieIds: droppedIds };
+}
+
+/** 同一スケジュール枠・同一トライアルの出撃を1件にまとめるキー */
+function sortieDedupeKey(s) {
+  if (!s) return '';
+  const trial = String(s.trialId || '').trim();
+  const slot = String(s.slotKey || '').trim();
+  if (slot) return `slot:${slot}|trial:${trial || String(s.objective || '').trim()}`;
+  const start = String(s.startAt || '');
+  const end = String(s.endAt || '');
+  const region = String(s.regionSlug || s.server || '');
+  const map = String(s.map || '');
+  const event = String(s.event || '');
+  const obj = trial || String(s.objective || '');
+  return `meta:${start}|${end}|${region}|${map}|${event}|${obj}`;
+}
+
+function sortieContentScore(s) {
+  ensureParties(s);
+  const members = (s.parties || []).reduce((n, p) => n + (Array.isArray(p) ? p.length : 0), 0);
+  const parties = (s.parties || []).length;
+  return members * 1e12 + parties * 1e9 + Number(s.updatedAt || s.createdAt || 0);
+}
+
+/** donor の参加者を keeper に寄せる（空きがあれば） */
+function mergeSortiePartiesInto(keeper, donor) {
+  if (!keeper || !donor) return;
+  ensureParties(keeper);
+  ensureParties(donor);
+  const keeperCount = keeper.parties.reduce((n, p) => n + p.length, 0);
+  const donorCount = donor.parties.reduce((n, p) => n + p.length, 0);
+  if (!donorCount) return;
+  if (!keeperCount) {
+    keeper.parties = donor.parties.map((p) => [...p]);
+    if (Array.isArray(donor.partySizes)) keeper.partySizes = [...donor.partySizes];
+    if (Array.isArray(donor.partyTimingTags)) {
+      keeper.partyTimingTags = donor.partyTimingTags.map((t) => (Array.isArray(t) ? [...t] : []));
+    }
+    refreshSortieRoster(keeper);
+    keeper.updatedAt = Date.now();
+    return;
+  }
+  const seen = new Set(keeper.parties.flat());
+  for (let i = 0; i < donor.parties.length; i++) {
+    while (keeper.parties.length <= i) {
+      keeper.parties.push([]);
+      if (Array.isArray(keeper.partySizes)) keeper.partySizes.push(partySizeAt(keeper, 0));
+      if (Array.isArray(keeper.partyTimingTags)) keeper.partyTimingTags.push([]);
+    }
+    const size = partySizeAt(keeper, i);
+    for (const id of donor.parties[i] || []) {
+      if (!id || seen.has(id)) continue;
+      if (keeper.parties[i].length >= size) continue;
+      keeper.parties[i].push(id);
+      seen.add(id);
+    }
+  }
+  compactEmptyParties(keeper);
+  refreshSortieRoster(keeper);
+  keeper.updatedAt = Date.now();
+}
+
+/**
+ * 同じ枠・同じトライアルの出撃を1件に統合する。
+ * @returns {{ sorties: any[], droppedIds: string[], alias: Map<string, string>, changed: boolean }}
+ */
+function collapseDuplicateSorties(sorties, { mutate = false } = {}) {
+  const list = Array.isArray(sorties) ? sorties : [];
+  /** @type {Map<string, any[]>} */
+  const groups = new Map();
+  for (const s of list) {
+    const key = sortieDedupeKey(s);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  const out = [];
+  /** @type {Map<string, string>} */
+  const alias = new Map();
+  const droppedIds = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      out.push(group[0]);
+      continue;
+    }
+    const ranked = [...group].sort((a, b) => sortieContentScore(b) - sortieContentScore(a));
+    const keeper = mutate ? ranked[0] : { ...ranked[0] };
+    if (!mutate) {
+      keeper.parties = Array.isArray(ranked[0].parties)
+        ? ranked[0].parties.map((p) => (Array.isArray(p) ? [...p] : []))
+        : [[]];
+    }
+    for (const dup of ranked.slice(1)) {
+      mergeSortiePartiesInto(keeper, dup);
+      alias.set(String(dup.id), String(keeper.id));
+      droppedIds.push(String(dup.id));
+    }
+    out.push(keeper);
+  }
+  // キー無しは末尾に残す
+  for (const s of list) {
+    if (!sortieDedupeKey(s)) out.push(s);
+  }
+  return { sorties: out, droppedIds, alias, changed: droppedIds.length > 0 };
+}
+
+/** 端末上の重複出撃を統合（共有へも反映） */
+function repairDuplicateSorties() {
+  const { sorties, droppedIds, alias, changed } = collapseDuplicateSorties(state.sorties, {
+    mutate: true,
+  });
+  if (!changed) return false;
+  for (const id of droppedIds) markSortieDeleted(id);
+  if (partySortieId && alias.has(String(partySortieId))) {
+    partySortieId = alias.get(String(partySortieId));
+  }
+  state.sorties = sorties;
+  return true;
 }
 
 /**
@@ -1843,6 +1967,7 @@ function applySharedBoard(board, { repairPush = false } = {}) {
       })
     : [];
   let repaired = dedupeMembersByName();
+  if (repairDuplicateSorties()) repaired = true;
   for (const s of state.sorties) {
     compactEmptyParties(s);
     if (reconcileSortieAgainstMembers(s)) repaired = true;
@@ -1859,11 +1984,12 @@ function isRegisteredSlot(slot, trialId) {
 
 function findSortieForSlot(slot, trialId) {
   const key = slotKey(slot);
-  return (
-    state.sorties.find(
-      (s) => s.slotKey === key && (s.trialId == null || s.trialId === trialId)
-    ) || null
+  const matches = state.sorties.filter(
+    (s) => s.slotKey === key && (s.trialId == null || s.trialId === trialId)
   );
+  if (!matches.length) return null;
+  if (matches.length === 1) return matches[0];
+  return [...matches].sort((a, b) => sortieContentScore(b) - sortieContentScore(a))[0];
 }
 
 function ensureSortieFromSchedule(trial, slot) {
@@ -4587,7 +4713,10 @@ function render(opts = {}) {
 
 render();
 (async () => {
-  if (dedupeMembersByName()) {
+  let localRepaired = false;
+  if (dedupeMembersByName()) localRepaired = true;
+  if (repairDuplicateSorties()) localRepaired = true;
+  if (localRepaired) {
     for (const s of state.sorties) reconcileSortieAgainstMembers(s);
     saveState(state);
     noteLocalBoardChange();
@@ -4600,6 +4729,7 @@ render();
     boardReady = true;
     showToast('共有ボードに接続できません（この端末のみで動作）');
   }
+  if (localRepaired && boardReady) queueBoardPush();
   refreshUi();
   startBoardPolling();
   loadSchedule();
