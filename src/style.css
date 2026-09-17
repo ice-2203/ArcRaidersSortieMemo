@@ -13,6 +13,9 @@
   --accent: #22b8ff;
   --accent2: #ff7a1a;
   --accent3: #62ff6a;
+  --overlap: #f472b6;
+  --overlap-bg: rgba(244, 114, 182, 0.1);
+  --overlap-bdr: rgba(244, 114, 182, 0.48);
   --ok: #62ff6a;
   --danger: #ff5d6c;
   --act-bg: rgba(98, 255, 106, 0.08);
@@ -1713,9 +1716,9 @@ input {
   display: flex;
   flex-direction: column;
   gap: 0;
-  border: 1px solid rgba(255, 122, 26, 0.45);
+  border: 1px solid var(--overlap-bdr);
   border-radius: 10px;
-  background: rgba(255, 122, 26, 0.06);
+  background: rgba(244, 114, 182, 0.06);
   overflow: hidden;
   box-shadow: var(--shadow);
   position: relative;
@@ -1729,14 +1732,14 @@ input {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--accent2);
-  border: 2px solid var(--accent2);
+  background: var(--overlap);
+  border: 2px solid var(--overlap);
   box-sizing: border-box;
-  box-shadow: 0 0 0 3px rgba(255, 122, 26, 0.18);
+  box-shadow: 0 0 0 3px rgba(244, 114, 182, 0.2);
 }
 
 .sortie-overlap-cluster.is-live::before {
-  box-shadow: 0 0 0 3px rgba(98, 255, 106, 0.16), 0 0 0 3px rgba(255, 122, 26, 0.18);
+  box-shadow: 0 0 0 3px rgba(98, 255, 106, 0.16), 0 0 0 3px rgba(244, 114, 182, 0.2);
 }
 
 .sortie-overlap-cluster-head {
@@ -1744,8 +1747,8 @@ input {
   flex-direction: column;
   gap: 4px;
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(255, 122, 26, 0.28);
-  background: rgba(255, 122, 26, 0.1);
+  border-bottom: 1px solid rgba(244, 114, 182, 0.28);
+  background: var(--overlap-bg);
 }
 
 .sortie-overlap-cluster-primary {
@@ -1766,7 +1769,7 @@ input {
 }
 
 .sortie-overlap-cluster-time .sortie-time-range {
-  color: #ffb070;
+  color: #f9a8d4;
   font-size: 14px;
   flex-shrink: 0;
 }
@@ -1788,11 +1791,11 @@ input {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.03em;
-  color: #ffb070;
+  color: #fbcfe8;
   padding: 1px 6px;
   border-radius: 4px;
-  border: 1px solid rgba(255, 122, 26, 0.4);
-  background: rgba(255, 122, 26, 0.16);
+  border: 1px solid rgba(244, 114, 182, 0.5);
+  background: rgba(244, 114, 182, 0.18);
   white-space: nowrap;
 }
 
@@ -1820,7 +1823,7 @@ input {
   border-radius: 0;
   box-shadow: none;
   border: 0;
-  border-bottom: 1px solid rgba(255, 122, 26, 0.18);
+  border-bottom: 1px solid rgba(244, 114, 182, 0.22);
   background: transparent;
   margin: 0;
   padding: 8px 10px;
