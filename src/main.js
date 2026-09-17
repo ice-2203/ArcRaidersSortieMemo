@@ -3592,12 +3592,22 @@ function render(opts = {}) {
 
   const brand = document.createElement('div');
   brand.className = 'brand';
+  const mark = document.createElement('img');
+  mark.className = 'brand-mark';
+  mark.src = '/favicon.svg';
+  mark.alt = '';
+  mark.width = 28;
+  mark.height = 28;
+  mark.decoding = 'async';
+  const brandText = document.createElement('div');
+  brandText.className = 'brand-text';
   const title = document.createElement('h1');
   title.textContent = 'レイド予約';
-  brand.appendChild(title);
+  brandText.appendChild(title);
   const sub = document.createElement('p');
   sub.textContent = 'レイド予定は共有されます';
-  brand.appendChild(sub);
+  brandText.appendChild(sub);
+  brand.append(mark, brandText);
   top.appendChild(brand);
 
   const actions = document.createElement('div');
