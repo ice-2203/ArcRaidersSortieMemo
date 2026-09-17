@@ -1536,6 +1536,184 @@ function openModal(node) {
   document.body.appendChild(node);
 }
 
+const HELP_TOPICS = [
+  {
+    id: 'overview',
+    title: 'はじめに',
+    summary: 'このサイトでできること',
+    body: `
+      <p class="help-modal-para">このサイトは、ARC Raiders の<strong>レイド予約・メンバー共有</strong>用ツールです。MetaForge のスケジュールを見ながら時間枠を予約し、参加者やパーティ編成を仲間と共有できます。</p>
+      <ul class="help-modal-dot-list">
+        <li><strong>すべて</strong> … 今週／来週のトライアルカードと時間枠</li>
+        <li><strong>レイド</strong> … 予約済みの一覧（タイムライン）</li>
+        <li>予約内容は共有ボード経由で同じ URL を開いた端末と同期されます</li>
+      </ul>
+    `,
+  },
+  {
+    id: 'schedule',
+    title: 'スケジュール（すべて）',
+    summary: 'トライアルカードと時間枠',
+    body: `
+      <p class="help-modal-para">上部の<strong>今週／来週</strong>と<strong>すべて</strong>で、トライアルカードを横に並べて表示します。</p>
+      <ul class="help-modal-dot-list">
+        <li>カードをタップすると、表示する<strong>マップ／イベント</strong>を選べます（すぐ反映）</li>
+        <li>サーバー（NA・EU など）はツールバーのボタンで切り替えます</li>
+        <li>時間枠の<strong>予約する</strong>でレイド登録、<strong>編集</strong>でメンバー画面を開きます</li>
+      </ul>
+    `,
+  },
+  {
+    id: 'reserve',
+    title: 'レイドを予約する',
+    summary: '時間枠の登録と編集',
+    body: `
+      <p class="help-modal-para">空き枠の<strong>予約する</strong>を押すと、その時間のレイドが登録され、メンバー編集画面が開きます。</p>
+      <ul class="help-modal-dot-list">
+        <li>すでに予約済みの枠は青系で表示され、<strong>編集</strong>から内容を変えられます</li>
+        <li>実施中の枠は緑系で強調されます</li>
+        <li>不要になったらメンバー画面の<strong>レイドを解除</strong>で削除できます</li>
+      </ul>
+    `,
+  },
+  {
+    id: 'party',
+    title: 'メンバーとパーティ',
+    summary: 'デュオ／トリオ・名簿',
+    body: `
+      <p class="help-modal-para">メンバー画面では参加者の追加とパーティ分けができます。</p>
+      <ul class="help-modal-dot-list">
+        <li><strong>デュオ／トリオ</strong> … 1パーティあたりの人数上限（2人／3人）</li>
+        <li>パーティ枠をタップしてメンバーを選ぶか、PCではドラッグでも移動できます</li>
+        <li>名簿のアイコンで画像変更、名前変更／×で名簿の編集ができます</li>
+        <li><strong>0分開始／最終便</strong> … その時間帯の入り方メモ（レイド一覧で見やすく表示）</li>
+        <li>空きがあるときは <strong>@1募集中</strong> のように表示されます</li>
+      </ul>
+    `,
+  },
+  {
+    id: 'raid-list',
+    title: 'レイド一覧と絞り込み',
+    summary: 'タイムライン・メンバー・募集中',
+    body: `
+      <p class="help-modal-para">上部の<strong>レイド</strong>表示では、予約を時間順のタイムラインで見られます。</p>
+      <ul class="help-modal-dot-list">
+        <li><strong>メンバー: …</strong> … 選んだ人が1人でも参加しているレイドだけ表示</li>
+        <li><strong>募集中</strong> … 空き枠があるレイドだけ表示（両方併用可）</li>
+        <li>同じ時間・同じメンバーで重なる枠は<strong>重複</strong>としてまとまります</li>
+        <li>行の ⋯ メニューから編集／解除ができます</li>
+      </ul>
+    `,
+  },
+  {
+    id: 'discord',
+    title: 'Discord用コピー',
+    summary: '募集文の共有',
+    body: `
+      <p class="help-modal-para">メンバー画面の<strong>Discord用コピー</strong>で、日時・マップ・編成・参加者・募集枠入りのテキストをクリップボードにコピーできます。そのまま Discord の募集に貼り付けて使えます。</p>
+    `,
+  },
+  {
+    id: 'notes',
+    title: '注意事項',
+    summary: '出典と非公式であること',
+    body: `
+      <p class="help-modal-para">スケジュール情報の出典は <a href="https://metaforge.app/arc-raiders" target="_blank" rel="noopener noreferrer">MetaForge</a> です。ゲーム内や公式情報と異なる場合は、公式情報を優先してください。</p>
+      <p class="help-modal-para">本サイトは非公式のファンメイドツールであり、公式・Embark とは無関係です。</p>
+    `,
+  },
+];
+
+function openHelpModal(topicId = null) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeModal();
+  });
+
+  const modalEl = document.createElement('div');
+  modalEl.className = 'modal modal-help';
+  modalEl.setAttribute('role', 'dialog');
+  modalEl.setAttribute('aria-modal', 'true');
+  modalEl.setAttribute('aria-labelledby', 'help-modal-title');
+
+  const paint = (activeId) => {
+    const topic = HELP_TOPICS.find((t) => t.id === activeId) || null;
+    modalEl.innerHTML = `
+      <div class="party-modal-head">
+        <h3 id="help-modal-title">${topic ? esc(topic.title) : 'このサイトの使い方'}</h3>
+        <button type="button" class="btn modal-close" data-act="close">閉じる</button>
+      </div>
+      <div class="help-modal-body" data-body></div>
+    `;
+    const body = modalEl.querySelector('[data-body]');
+    if (!topic) {
+      const intro = document.createElement('p');
+      intro.className = 'help-modal-intro';
+      intro.textContent =
+        '知りたい項目を選んでください。レイドの予約からメンバー編成、絞り込みまでまとめています。';
+      body.appendChild(intro);
+      const list = document.createElement('div');
+      list.className = 'help-modal-topic-list';
+      for (const t of HELP_TOPICS) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'help-modal-topic-btn';
+        btn.innerHTML = `<span class="help-modal-topic-btn-title">${esc(t.title)}</span><span class="help-modal-topic-btn-summary">${esc(t.summary)}</span>`;
+        btn.addEventListener('click', () => paint(t.id));
+        list.appendChild(btn);
+      }
+      body.appendChild(list);
+      const note = document.createElement('p');
+      note.className = 'help-modal-note';
+      note.textContent =
+        '※ スケジュールの出典は MetaForge です。ゲーム内や公式と異なる場合は公式情報を優先してください。';
+      body.appendChild(note);
+    } else {
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'help-modal-back-btn';
+      back.textContent = '← 一覧に戻る';
+      back.addEventListener('click', () => paint(null));
+      body.appendChild(back);
+      const detail = document.createElement('div');
+      detail.className = 'help-modal-detail';
+      detail.innerHTML = topic.body;
+      body.appendChild(detail);
+    }
+    modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
+  };
+
+  paint(topicId);
+  backdrop.appendChild(modalEl);
+  openModal(backdrop);
+}
+
+function openAboutModal() {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeModal();
+  });
+  const modalEl = document.createElement('div');
+  modalEl.className = 'modal modal-help';
+  modalEl.setAttribute('role', 'dialog');
+  modalEl.setAttribute('aria-modal', 'true');
+  modalEl.innerHTML = `
+    <div class="party-modal-head">
+      <h3>このサイトについて</h3>
+      <button type="button" class="btn modal-close" data-act="close">閉じる</button>
+    </div>
+    <div class="help-modal-body">
+      <p class="help-modal-para">本サイトは、個人クリエイター「あいすおじ」が制作・公開している、ARC Raiders 向けの無料ユーティリティです。週次トライアルのスケジュールを見ながらレイド枠を予約し、参加者やパーティ編成を共有できます。</p>
+      <p class="help-modal-para">スケジュール情報は MetaForge を参照しています。ゲーム内や公式情報と異なる場合は、公式情報を優先してください。非公式のファンメイドツールであり、公式とは無関係です。</p>
+    </div>
+  `;
+  modalEl.querySelector('[data-act="close"]').addEventListener('click', () => closeModal());
+  backdrop.appendChild(modalEl);
+  openModal(backdrop);
+}
+
 async function loadSchedule() {
   loading = true;
   loadError = '';
@@ -3564,6 +3742,41 @@ function render(opts = {}) {
   } else {
     app.append(top, main);
   }
+
+  const footer = document.createElement('footer');
+  footer.className = 'site-footer';
+  footer.setAttribute('role', 'contentinfo');
+
+  const helpBtn = document.createElement('button');
+  helpBtn.type = 'button';
+  helpBtn.className = 'site-footer-help';
+  helpBtn.textContent = '使い方';
+  helpBtn.title = 'このサイトの使い方';
+  helpBtn.addEventListener('click', () => openHelpModal());
+
+  const attribution = document.createElement('a');
+  attribution.href = 'https://metaforge.app/arc-raiders';
+  attribution.target = '_blank';
+  attribution.rel = 'noopener noreferrer';
+  attribution.textContent = '出典: MetaForge';
+
+  const credit = document.createElement('a');
+  credit.className = 'site-footer-credit';
+  credit.href = 'https://x.com/ice_oji22';
+  credit.target = '_blank';
+  credit.rel = 'noopener noreferrer';
+  credit.textContent = '@あいすおじ';
+
+  const aboutBtn = document.createElement('button');
+  aboutBtn.type = 'button';
+  aboutBtn.className = 'site-footer-about';
+  aboutBtn.textContent = 'About';
+  aboutBtn.title = 'このサイトについて';
+  aboutBtn.addEventListener('click', () => openAboutModal());
+
+  footer.append(helpBtn, attribution, credit, aboutBtn);
+  app.appendChild(footer);
+
   window.scrollTo(0, scrollY);
   const nextRail = app.querySelector('.trial-rail');
   if (nextRail) {
