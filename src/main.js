@@ -2128,6 +2128,7 @@ function openPartyModal(sortieId) {
       else showToast(`選択は最大${partySizeOf(getSortie())}人です（名簿には追加済み）`);
       fillName.value = '';
       paintFillSheet();
+      fillSheet.querySelector('[data-fill-name]')?.focus();
     };
     addRow.querySelector('[data-fill-add]').addEventListener('click', doFillAdd);
     fillName.addEventListener('keydown', (e) => {
@@ -2416,6 +2417,9 @@ function openPartyModal(sortieId) {
   };
 
   const nameInput = modalEl.querySelector('[data-name]');
+  const focusNameInput = () => {
+    modal?.querySelector?.('[data-name]')?.focus();
+  };
   const doAdd = () => {
     const member = createMember({ name: nameInput.value });
     if (!member) return showToast('名前を入れてください');
@@ -2427,6 +2431,7 @@ function openPartyModal(sortieId) {
       openPartyModal(sortieId);
     }
     showToast(`${member.name} を名簿に追加しました`);
+    queueMicrotask(focusNameInput);
   };
   modalEl.querySelector('[data-add]').addEventListener('click', doAdd);
   nameInput.addEventListener('keydown', (e) => {
