@@ -1480,7 +1480,7 @@ function fmtSlotRange(startMs, endMs) {
 function fmtDateWeekJa(ms) {
   const d = new Date(ms);
   const week = ['日', '月', '火', '水', '木', '金', '土'][d.getDay()];
-  return `${d.getMonth() + 1}月${d.getDate()}日 (${week})`;
+  return `${d.getMonth() + 1}月${d.getDate()}日（${week}）`;
 }
 
 /** Discord / クリップボード用の短い日付 */
@@ -4021,9 +4021,6 @@ function render(opts = {}) {
   const title = document.createElement('h1');
   title.textContent = 'レイド予約';
   brandText.appendChild(title);
-  const sub = document.createElement('p');
-  sub.textContent = 'レイド予定は共有されます';
-  brandText.appendChild(sub);
   brand.append(mark, brandText);
   top.appendChild(brand);
 

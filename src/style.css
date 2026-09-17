@@ -348,16 +348,6 @@ input {
   line-height: 1.2;
 }
 
-.brand p {
-  margin-top: 2px;
-  color: var(--text3);
-  font-size: 0.72rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 42vw;
-}
-
 .week-seg,
 .seg {
   display: inline-flex;
@@ -441,9 +431,6 @@ input {
     width: 24px;
     height: 24px;
   }
-  .brand p {
-    display: none;
-  }
   .brand h1 {
     font-size: 1.05rem;
   }
@@ -457,7 +444,6 @@ input {
 }
 
 @media (max-height: 720px) {
-  .brand p,
   .schedule-hint {
     display: none;
   }
@@ -723,7 +709,8 @@ input {
 }
 
 .trial-card {
-  --trial-card-w: min(320px, 90vw);
+  /* 基本は固定幅。広い画面では下のメディアクエリで等分に伸ばす */
+  --trial-card-w: 340px;
   flex: 0 0 var(--trial-card-w);
   width: var(--trial-card-w);
   max-width: var(--trial-card-w);
@@ -754,13 +741,12 @@ input {
   max-height: 100%;
 }
 
-/* 2枚以上：余裕があれば等分で広げ、足りなければ最小幅を保って横スクロール */
+/* 2枚以上かつ広い画面：余白があれば等分で広げる（最小は固定幅と同じ） */
 @media (min-width: 901px) {
   .trial-rail:has(> .trial-card:nth-child(2)) .trial-card {
-    --trial-card-min: 260px;
-    flex: 1 1 var(--trial-card-min);
+    flex: 1 1 var(--trial-card-w);
     width: auto;
-    min-width: var(--trial-card-min);
+    min-width: var(--trial-card-w);
     max-width: none;
   }
 }
@@ -1007,7 +993,7 @@ input {
   display: flex;
   flex-wrap: nowrap;
   align-items: baseline;
-  gap: 4px;
+  gap: 4px 6px;
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
@@ -1033,9 +1019,10 @@ input {
 .t-date {
   font-size: 11px;
   color: var(--text3);
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
   line-height: 1.2;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .trial-sched-cd {
