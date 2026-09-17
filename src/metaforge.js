@@ -1,7 +1,7 @@
 import { mapJa, eventJa, trialJa, SERVER_REGIONS } from './names.js';
 
-/** イベントタイマー同様、最大おおよそ10日分まで見る */
-const HORIZON_MS = 10 * 24 * 60 * 60 * 1000;
+/** 今週＋来週トライアルをカバーできるよう、最大おおよそ21日分まで見る */
+const HORIZON_MS = 21 * 24 * 60 * 60 * 1000;
 const MF_BASE = 'https://metaforge.app/api/arc-raiders';
 
 function floorHourMs(ms) {

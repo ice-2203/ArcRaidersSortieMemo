@@ -3365,7 +3365,7 @@ function renderTrialCard(trial) {
     }
     sched.appendChild(empty);
   } else {
-    for (const slot of visible.slice(0, 40)) {
+    for (const slot of visible) {
       const remain = remainText(slot.startMs, slot.endMs);
       const sortie = findSortieForSlot(slot, trial.id);
       const registered = !!sortie;
