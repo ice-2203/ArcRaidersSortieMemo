@@ -1794,6 +1794,8 @@ input {
 }
 
 .sortie-timeline {
+  --sortie-time-col: minmax(88px, 108px);
+  --sortie-time-gap: 12px;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -1908,6 +1910,8 @@ input {
   border-left: 2px solid rgba(34, 184, 255, 0.28);
   padding-left: 14px;
   margin-left: 6px;
+  --sortie-time-col: minmax(88px, 108px);
+  --sortie-time-gap: 12px;
 }
 
 .sortie-time-row {
@@ -1918,8 +1922,8 @@ input {
   font: inherit;
   cursor: pointer;
   display: grid;
-  grid-template-columns: minmax(96px, 120px) minmax(0, 1fr);
-  gap: 10px 14px;
+  grid-template-columns: var(--sortie-time-col) minmax(0, 1fr);
+  gap: 8px var(--sortie-time-gap);
   align-items: start;
   padding: 10px 12px;
   border: 1px solid var(--border2);
@@ -1995,46 +1999,21 @@ input {
 }
 
 .sortie-overlap-cluster-head {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
+  display: grid;
+  grid-template-columns: var(--sortie-time-col) minmax(0, 1fr);
+  gap: 8px var(--sortie-time-gap);
+  align-items: start;
+  padding: 10px 12px;
   border-bottom: 1px solid rgba(244, 114, 182, 0.28);
   background: var(--overlap-bg);
 }
 
-.sortie-overlap-cluster-primary {
+.sortie-overlap-cluster-meta {
   display: flex;
-  flex-wrap: nowrap;
-  align-items: baseline;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   min-width: 0;
-}
-
-.sortie-overlap-cluster-time {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.sortie-overlap-cluster-time .sortie-time-range {
-  color: #f9a8d4;
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.sortie-overlap-cluster-time .sortie-time-cd {
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sortie-overlap-cluster.is-live .sortie-overlap-cluster-time .sortie-time-range {
-  color: var(--accent3);
 }
 
 .sortie-overlap-cluster-label {
@@ -2052,13 +2031,72 @@ input {
 }
 
 .sortie-overlap-cluster-members {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
+  width: 100%;
   font-size: 11px;
   color: var(--text2);
-  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.sortie-overlap-cluster-party {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sortie-overlap-cluster-party .slot-party-gmark {
+  margin-top: 1px;
+}
+
+.sortie-overlap-cluster-party-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.sortie-overlap-cluster-party-names {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.sortie-overlap-cluster-party-where {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 4px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--text3);
+}
+
+.sortie-overlap-cluster-where-sep {
+  flex: 0 0 auto;
+  color: #f9a8d4;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.sortie-overlap-cluster-where-title {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.sortie-overlap-cluster.is-live .sortie-overlap-cluster-head .sortie-time-range {
+  color: var(--accent3);
+}
+
+.sortie-overlap-cluster-head .sortie-time-range {
+  color: #f9a8d4;
 }
 
 .sortie-overlap-cluster-list {
@@ -2078,7 +2116,7 @@ input {
   border-bottom: 1px solid rgba(244, 114, 182, 0.22);
   background: transparent;
   margin: 0;
-  padding: 8px 10px;
+  padding: 10px 12px;
 }
 
 .sortie-time-row.is-overlap:last-child,
@@ -2087,11 +2125,11 @@ input {
 }
 
 .sortie-time-row.sortie-time-row--nested {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: var(--sortie-time-col) minmax(0, 1fr);
 }
 
 .sortie-overlap-cluster-list .sortie-time-row {
-  grid-template-columns: minmax(88px, 108px) minmax(0, 1fr);
+  grid-template-columns: var(--sortie-time-col) minmax(0, 1fr);
 }
 
 .sortie-time-row.sortie-time-row--nested::before,
@@ -2102,10 +2140,6 @@ input {
 .sortie-overlap-cluster-list .sortie-time-title {
   font-size: 13px;
   font-weight: 600;
-}
-
-.sortie-overlap-cluster-list .sortie-time-range {
-  font-size: 14px;
 }
 
 .sortie-time-row.is-overlap:hover,
@@ -2139,7 +2173,7 @@ input {
 
 .sortie-time-range {
   font-family: var(--fmono);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0;
   color: var(--text);
@@ -2147,6 +2181,7 @@ input {
   display: inline-flex;
   align-items: baseline;
   gap: 0;
+  flex-shrink: 0;
 }
 
 .sortie-time-range .t-dash {
@@ -2160,9 +2195,10 @@ input {
 
 .sortie-time-cd {
   font-family: var(--fmono);
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text3);
   letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
 .sortie-time-cd.is-live {
@@ -2251,38 +2287,35 @@ input {
 }
 
 @media (max-width: 640px) {
+  .sortie-timeline,
+  .sortie-day-track {
+    --sortie-time-col: minmax(72px, 88px);
+    --sortie-time-gap: 10px;
+  }
+
   .sortie-time-row {
-    grid-template-columns: minmax(72px, 88px) minmax(0, 1fr);
-    gap: 8px 10px;
+    gap: 8px var(--sortie-time-gap);
     padding: 8px 10px;
   }
 
   .sortie-time-row.sortie-time-row--nested {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: var(--sortie-time-col) minmax(0, 1fr);
   }
 
   .sortie-overlap-cluster-list .sortie-time-row {
-    grid-template-columns: minmax(72px, 84px) minmax(0, 1fr);
-  }
-
-  .sortie-time-range {
-    font-size: 13px;
-  }
-
-  .sortie-time-title {
-    font-size: 13px;
+    grid-template-columns: var(--sortie-time-col) minmax(0, 1fr);
   }
 
   .sortie-overlap-cluster-head {
-    padding: 7px 8px;
-    gap: 3px;
+    padding: 8px 10px;
   }
 
-  .sortie-overlap-cluster-primary {
-    gap: 6px;
+  .sortie-time-row.is-overlap,
+  .sortie-time-row.sortie-time-row--nested {
+    padding: 8px 10px;
   }
 
-  .sortie-overlap-cluster-time .sortie-time-range {
+  .sortie-time-title {
     font-size: 13px;
   }
 

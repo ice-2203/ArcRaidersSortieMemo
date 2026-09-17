@@ -3564,41 +3564,115 @@ function memberFilterSummaryText() {
   return `メンバー: ${who}`;
 }
 
-function sortieMemberFingerprint(sortie) {
-  return [...sortieMemberIdSet(sortie)].sort().join('\u0001');
-}
-
-function sortieMemberNamesLine(sortie) {
-  const names = [...sortieMemberIdSet(sortie)]
-    .map((id) => memberById(id, sortie)?.name)
-    .filter(Boolean);
-  names.sort((a, b) => a.localeCompare(b, 'ja'));
-  return names.join('・');
+/** 重複クラスタ見出し用: 2つ以上の出撃に共通するパーティと、重なっている出撃一覧 */
+function overlapClusterPartyEntries(groupItems) {
+  /** @type {Map<string, { count: number, names: string, sorties: Map<string, object> }>} */
+  const byFp = new Map();
+  for (const item of groupItems) {
+    const sortie = item.sortie;
+    /** @type {Set<string>} 同一出撃内の重複パーティは1回だけ数える */
+    const seen = new Set();
+    for (const group of partyMemberLists(sortie)) {
+      if (!group.length) continue;
+      const fp = group
+        .map((m) => m.id)
+        .sort()
+        .join('\u0001');
+      if (seen.has(fp)) continue;
+      seen.add(fp);
+      let cur = byFp.get(fp);
+      if (!cur) {
+        cur = {
+          count: 0,
+          names: group.map((m) => m.name).join('・'),
+          sorties: new Map(),
+        };
+        byFp.set(fp, cur);
+      }
+      cur.count += 1;
+      cur.sorties.set(sortie.id, sortie);
+    }
+  }
+  return [...byFp.values()]
+    .filter((p) => p.count >= 2)
+    .map((p) => ({
+      names: p.names,
+      sorties: [...p.sorties.values()].sort(
+        (a, b) =>
+          String(a.objective || '').localeCompare(String(b.objective || ''), 'ja') ||
+          String(a.id).localeCompare(String(b.id))
+      ),
+    }));
 }
 
 /**
- * 同じ時間帯・同じメンバー・複数トライアルの重複キー（対象外は null）
+ * 同じ時間帯でメンバーがつながっている出撃を重複にする（連結成分）
+ * 例: A∋P1, B∋P1+P2, C∋P2 → A・B・C を一つのクラスタにまとめる
  * @returns {Map<string, string>} sortieId → overlapKey
  */
 function buildSortieOverlapKeyById(list) {
   /** @type {Map<string, typeof list>} */
-  const byKey = new Map();
+  const bySlot = new Map();
   for (const item of list) {
-    const members = sortieMemberFingerprint(item.sortie);
-    if (!members) continue;
-    const key = `${item.startMs}|${item.endMs}|${members}`;
-    if (!byKey.has(key)) byKey.set(key, []);
-    byKey.get(key).push(item);
+    if (!sortieMemberIdSet(item.sortie).size) continue;
+    const slot = `${item.startMs}|${item.endMs}`;
+    if (!bySlot.has(slot)) bySlot.set(slot, []);
+    bySlot.get(slot).push(item);
   }
+
   /** @type {Map<string, string>} */
   const out = new Map();
-  for (const [key, group] of byKey) {
-    if (group.length < 2) continue;
-    const trialKeys = new Set(
-      group.map((g) => String(g.sortie.trialId || g.sortie.objective || g.sortie.id))
-    );
-    if (trialKeys.size < 2) continue;
-    for (const item of group) out.set(item.sortie.id, key);
+  let seq = 0;
+
+  for (const [slot, items] of bySlot) {
+    if (items.length < 2) continue;
+
+    const n = items.length;
+    const parent = Array.from({ length: n }, (_, i) => i);
+    const find = (a) => {
+      while (parent[a] !== a) {
+        parent[a] = parent[parent[a]];
+        a = parent[a];
+      }
+      return a;
+    };
+    const union = (a, b) => {
+      const ra = find(a);
+      const rb = find(b);
+      if (ra !== rb) parent[rb] = ra;
+    };
+
+    /** @type {Map<string, number[]>} */
+    const memberToIdx = new Map();
+    for (let i = 0; i < n; i++) {
+      for (const id of sortieMemberIdSet(items[i].sortie)) {
+        if (!memberToIdx.has(id)) memberToIdx.set(id, []);
+        memberToIdx.get(id).push(i);
+      }
+    }
+    for (const idxs of memberToIdx.values()) {
+      for (let k = 1; k < idxs.length; k++) union(idxs[0], idxs[k]);
+    }
+
+    /** @type {Map<number, number[]>} */
+    const comps = new Map();
+    for (let i = 0; i < n; i++) {
+      const r = find(i);
+      if (!comps.has(r)) comps.set(r, []);
+      comps.get(r).push(i);
+    }
+
+    for (const idxs of comps.values()) {
+      if (idxs.length < 2) continue;
+      const trialKeys = new Set(
+        idxs.map((i) =>
+          String(items[i].sortie.trialId || items[i].sortie.objective || items[i].sortie.id)
+        )
+      );
+      if (trialKeys.size < 2) continue;
+      const key = `${slot}|cc${seq++}`;
+      for (const i of idxs) out.set(items[i].sortie.id, key);
+    }
   }
   return out;
 }
@@ -3636,8 +3710,7 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
 
   const row = document.createElement('div');
   row.className = 'sortie-time-row';
-  if (hideTime) row.classList.add('sortie-time-row--nested');
-  if (inOverlap) row.classList.add('is-overlap');
+  if (inOverlap) row.classList.add('sortie-time-row--nested', 'is-overlap');
   row.setAttribute('role', 'button');
   row.tabIndex = 0;
   if (remain.kind === 'live') row.classList.add('is-live');
@@ -3719,13 +3792,6 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
     head.appendChild(metaLine);
   }
 
-  if (hideTime && sharedTimingTags.length) {
-    const timing = document.createElement('div');
-    timing.className = 'sortie-time-timing-tags';
-    appendTimingTagEls(timing, sharedTimingTags);
-    head.appendChild(timing);
-  }
-
   const parties = document.createElement('div');
   parties.className = 'sortie-time-parties';
   const groups = partyGroupsEarly;
@@ -3759,7 +3825,7 @@ function renderSortieTimelineRow(item, { hideTime = false, inOverlap = false } =
       line.className = 'slot-party-line';
       appendPartyGroupLine(line, group, size);
       g.appendChild(line);
-      if (timingMixed || (hideTime && timingByParty[gi]?.length)) {
+      if (timingMixed && timingByParty[gi]?.length) {
         const tags = document.createElement('span');
         tags.className = 'slot-party-timing';
         appendPartyTimingTagEls(tags, sortie, gi);
@@ -3781,7 +3847,7 @@ function renderOverlapCluster(groupItems) {
   const first = groupItems[0];
   const { start, end } = fmtSlotRange(first.startMs, first.endMs);
   const remain = remainText(first.startMs, first.endMs);
-  const memberLine = sortieMemberNamesLine(first.sortie);
+  const partyEntries = overlapClusterPartyEntries(groupItems);
 
   const cluster = document.createElement('div');
   cluster.className = 'sortie-overlap-cluster';
@@ -3790,36 +3856,76 @@ function renderOverlapCluster(groupItems) {
   const head = document.createElement('div');
   head.className = 'sortie-overlap-cluster-head';
 
-  const primary = document.createElement('div');
-  primary.className = 'sortie-overlap-cluster-primary';
-
-  const time = document.createElement('div');
-  time.className = 'sortie-overlap-cluster-time';
-  time.innerHTML = `<span class="sortie-time-range"><span>${esc(start)}</span><span class="t-dash">-</span><span>${esc(
-    end
-  )}</span></span>`;
-  const cd = document.createElement('span');
+  const timeCol = document.createElement('div');
+  timeCol.className = 'sortie-time-col';
+  const range = document.createElement('div');
+  range.className = 'sortie-time-range';
+  range.innerHTML = `<span>${esc(start)}</span><span class="t-dash">-</span><span>${esc(end)}</span>`;
+  const cd = document.createElement('div');
   cd.className = 'sortie-time-cd';
   bindCountdownEl(cd, first.startMs, first.endMs, 'is-live');
-  time.appendChild(cd);
+  timeCol.append(range, cd);
 
+  const meta = document.createElement('div');
+  meta.className = 'sortie-overlap-cluster-meta';
   const label = document.createElement('div');
   label.className = 'sortie-overlap-cluster-label';
   label.textContent = `重複 ×${groupItems.length}`;
-
-  primary.append(time, label);
-
   const members = document.createElement('div');
   members.className = 'sortie-overlap-cluster-members';
-  members.textContent = memberLine || '参加者なし';
-  members.title = memberLine;
+  if (!partyEntries.length) {
+    members.textContent = '参加者なし';
+  } else {
+    const multi = partyEntries.length > 1;
+    partyEntries.forEach((entry, i) => {
+      const row = document.createElement('div');
+      row.className = 'sortie-overlap-cluster-party';
+      if (multi) {
+        const mark = document.createElement('span');
+        mark.className = 'slot-party-gmark';
+        mark.textContent = `${i + 1}`;
+        row.appendChild(mark);
+      }
+      const body = document.createElement('div');
+      body.className = 'sortie-overlap-cluster-party-body';
+      const names = document.createElement('div');
+      names.className = 'sortie-overlap-cluster-party-names';
+      names.textContent = entry.names;
+      names.title = entry.names;
+      body.appendChild(names);
 
-  head.append(primary, members);
+      if (entry.sorties.length >= 2) {
+        const where = document.createElement('div');
+        where.className = 'sortie-overlap-cluster-party-where';
+        entry.sorties.forEach((sortie, si) => {
+          if (si > 0) {
+            const sep = document.createElement('span');
+            sep.className = 'sortie-overlap-cluster-where-sep';
+            sep.textContent = '×';
+            where.appendChild(sep);
+          }
+          const title = document.createElement('span');
+          title.className = 'sortie-overlap-cluster-where-title';
+          const label = sortie.objective || '（内容未設定）';
+          title.textContent = label;
+          title.title = label;
+          where.appendChild(title);
+        });
+        body.appendChild(where);
+      }
+
+      row.appendChild(body);
+      members.appendChild(row);
+    });
+  }
+  meta.append(label, members);
+
+  head.append(timeCol, meta);
 
   const list = document.createElement('div');
   list.className = 'sortie-overlap-cluster-list';
   for (const item of groupItems) {
-    list.appendChild(renderSortieTimelineRow(item, { hideTime: false, inOverlap: true }));
+    list.appendChild(renderSortieTimelineRow(item, { inOverlap: true }));
   }
 
   cluster.append(head, list);
