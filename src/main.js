@@ -1019,9 +1019,32 @@ async function pullBoard({ migrateLocal = false } = {}) {
   }
 
   boardReady = true;
-  applySharedBoard(board, { repairPush: true });
+  // 端末の新しい編集を共有の古い取得で潰さない（updatedAt でマージ）
+  const mergedSorties = mergeSortieLists(board.sorties, localSorties);
+  const mergedMembers = mergeMemberLists(board.members, localMembers);
+  const collapsed = collapseBoardDuplicates(mergedMembers, mergedSorties);
+  for (const id of collapsed.droppedSortieIds || []) markSortieDeleted(id);
+  applySharedBoard(
+    {
+      sorties: collapsed.sorties,
+      members: collapsed.members,
+      updatedAt: board.updatedAt,
+    },
+    { repairPush: true }
+  );
   rememberRemoteBoard(board);
   pruneDeletedSortieTombstones(board.sorties);
+
+  const remoteById = new Map((board.sorties || []).map((s) => [String(s.id), s]));
+  const localNewer = collapsed.sorties.some((s) => {
+    const remote = remoteById.get(String(s.id));
+    if (!remote) return true;
+    return Number(s.updatedAt || 0) > Number(remote.updatedAt || 0);
+  });
+  if (localNewer) {
+    noteLocalBoardChange();
+    queueBoardPush();
+  }
   boardError = '';
 }
 
@@ -2225,8 +2248,13 @@ async function copyText(text) {
 function closeModal({ keepParty = false } = {}) {
   const closingParty = Boolean(partySortieId) && !keepParty;
   const editedSortieId = closingParty ? partySortieId : null;
+  // 確定前のメンバー選択を閉じるだけで捨てない
+  if (closingParty && typeof openPartyModal._flushPendingFill === 'function') {
+    openPartyModal._flushPendingFill();
+  }
   modal = null;
   openPartyModal._repaint = null;
+  openPartyModal._flushPendingFill = null;
   document.querySelector('.modal-backdrop')?.remove();
   if (!keepParty) {
     partySortieId = null;
@@ -2296,7 +2324,7 @@ const HELP_TOPICS = [
       <p class="help-modal-para">メンバー画面では参加者の追加とパーティ分けができます。</p>
       <ul class="help-modal-dot-list">
         <li><strong>デュオ／トリオ</strong> … パーティごとに人数上限を選べます（2人／3人）</li>
-        <li>パーティ枠をタップしてメンバーを選ぶか、PCではドラッグでも移動できます</li>
+        <li>パーティ枠をタップしてメンバーを選ぶか、PCではドラッグでも移動できます（選んだ内容は<strong>確定</strong>または<strong>閉じる</strong>で反映）</li>
         <li>名簿のアイコンで画像変更、名前変更／×で名簿の編集ができます</li>
         <li><strong>0分開始／最終便</strong> … パーティごとの入り方メモ（レイド一覧で見やすく表示）</li>
         <li>空きがあるときは <strong>@1募集中</strong> のように表示されます</li>
@@ -2552,7 +2580,8 @@ function removeSortieMember(sortieId, memberId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   removeMemberFromParties(sortie, memberId);
-  persist({ skipSync: true, sortieId });
+  // 閉じる前でも共有へ送れるよう、デバウンス付きで同期する
+  persist({ sortieId });
   if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
@@ -2568,7 +2597,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
   if (current === partyIndex) {
     if (toggleIfSame) {
       removeMemberFromParties(sortie, memberId);
-      persist({ skipSync: true, sortieId });
+      persist({ sortieId });
       if (!repaintPartyModal({ light: true })) {
         render();
         openPartyModal(sortieId);
@@ -2586,7 +2615,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     showToast(`パーティ${partyIndex + 1}は満員です（最大${size}人・${partySizeLabel(size)}）`);
     return;
   }
-  persist({ skipSync: true, sortieId });
+  persist({ sortieId });
   if (!repaintPartyModal({ light: true })) {
     render();
     openPartyModal(sortieId);
@@ -2679,7 +2708,7 @@ function openPartyModal(sortieId) {
     const how = modalEl.querySelector('[data-party-howto]');
     if (!how) return;
     how.textContent =
-      'パーティごとにデュオ／トリオと0分開始／最終便を選べます。パーティをタップしてメンバーを選びます。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。';
+      'パーティごとにデュオ／トリオと0分開始／最終便を選べます。パーティをタップしてメンバーを選び、確定または閉じるで反映します。名簿はアイコン＝画像、名前変更／×＝名簿の編集。PCはドラッグでも移動できます。';
   };
 
   const changePartyGroupSize = (partyIndex, next) => {
@@ -2721,10 +2750,23 @@ function openPartyModal(sortieId) {
     // モーダル中は末尾の空枠（+ 追加）を残し、途中の空だけ詰める
     if (wasOpen) {
       compactEmptyParties(getSortie(), { keepTrailingEmpty: true });
-      persist({ skipSync: true, sortieId });
+      persist({ sortieId });
       paintParties();
       updateMemberMarks();
     }
+  };
+
+  const flushPendingFill = () => {
+    if (fillPartyIndex == null) return;
+    const live = getSortie();
+    if (!live) {
+      fillPartyIndex = null;
+      fillSelected = new Set();
+      return;
+    }
+    setPartyMembers(live, fillPartyIndex, [...fillSelected]);
+    fillPartyIndex = null;
+    fillSelected = new Set();
   };
 
   const bindMemberDrag = (el, memberId) => {
@@ -2823,7 +2865,7 @@ function openPartyModal(sortieId) {
     back.type = 'button';
     back.className = 'btn modal-close';
     back.textContent = '戻る';
-    back.addEventListener('click', closeFillSheet);
+    back.addEventListener('click', applyFillSelection);
     head.append(titleWrap, back);
 
     const addRow = document.createElement('div');
@@ -3196,6 +3238,7 @@ function openPartyModal(sortieId) {
     else paintMembers();
     if (fillPartyIndex != null) paintFillSheet();
   };
+  openPartyModal._flushPendingFill = flushPendingFill;
 
   const nameInput = modalEl.querySelector('[data-name]');
   const focusNameInput = () => {
@@ -3234,7 +3277,7 @@ function openPartyModal(sortieId) {
     const live = getSortie();
     const before = ensureParties(live).length;
     const res = addEmptyParty(live);
-    persist({ skipSync: true, sortieId });
+    persist({ sortieId });
     if (!repaintPartyModal()) {
       openPartyModal(sortieId);
       return;
