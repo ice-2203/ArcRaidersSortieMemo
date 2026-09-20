@@ -704,7 +704,7 @@ function addEmptyParty(sortie) {
   return { ok: true, partyIndex: sortie.parties.length - 1 };
 }
 
-function refreshSortieRoster(sortie) {
+function refreshSortieRoster(sortie, { bumpUpdatedAt = false } = {}) {
   if (!sortie) return;
   ensureParties(sortie);
   // 空パーティはここでは消さない（編集中の「+ 追加」が消えてしまう）
@@ -729,7 +729,9 @@ function refreshSortieRoster(sortie) {
     if (!used.has(id)) delete next[id];
   }
   sortie.roster = next;
-  sortie.updatedAt = Date.now();
+  // push 前の全件掃除などで触ると、古い端末が「新しい」と誤認して上書きするため
+  // 明示したときだけ updatedAt を進める
+  if (bumpUpdatedAt) sortie.updatedAt = Date.now();
 }
 
 let boardPushTimer = null;
@@ -758,10 +760,7 @@ function rememberRemoteBoard(board) {
 }
 
 async function getRemoteBoardForMerge() {
-  // 直近の取得結果があれば再利用（Gist rate limit 対策）
-  if (cachedRemoteBoard && Date.now() - cachedRemoteAt < 20000) {
-    return cachedRemoteBoard;
-  }
+  // push 直前は必ず最新を取る（古いキャッシュで他端末の変更を潰さない）
   const board = await fetchSharedBoard();
   rememberRemoteBoard(board);
   return board;
@@ -817,6 +816,41 @@ function noteLocalBoardChange() {
   boardPushPending = true;
 }
 
+/** 同じ id の出撃は updatedAt が新しい方を採用。同時刻なら中身が厚い方 */
+function preferSortieVersion(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const ta = Number(a.updatedAt || 0);
+  const tb = Number(b.updatedAt || 0);
+  if (ta !== tb) return ta > tb ? a : b;
+  return sortieContentScore(a) >= sortieContentScore(b) ? a : b;
+}
+
+/**
+ * 採用側に、非採用側のパーティ人数・枠が多い情報を寄せる（片方が古い編成のまま上書きする事故を防ぐ）
+ */
+function coalesceSortieVersions(primary, secondary) {
+  if (!primary) return secondary;
+  if (!secondary) return primary;
+  const winner = preferSortieVersion(primary, secondary);
+  const other = winner === primary ? secondary : primary;
+  if (sortieContentScore(other) <= sortieContentScore(winner)) return winner;
+  const merged = {
+    ...winner,
+    parties: Array.isArray(winner.parties)
+      ? winner.parties.map((p) => (Array.isArray(p) ? [...p] : []))
+      : [[]],
+    partySizes: Array.isArray(winner.partySizes) ? [...winner.partySizes] : undefined,
+    partyTimingTags: Array.isArray(winner.partyTimingTags)
+      ? winner.partyTimingTags.map((t) => (Array.isArray(t) ? [...t] : []))
+      : undefined,
+    roster: winner.roster && typeof winner.roster === 'object' ? { ...winner.roster } : {},
+  };
+  mergeSortiePartiesInto(merged, other);
+  merged.updatedAt = Math.max(Number(primary.updatedAt || 0), Number(secondary.updatedAt || 0));
+  return merged;
+}
+
 function mergeSortieLists(remoteList, localList) {
   const map = new Map();
   for (const s of remoteList || []) {
@@ -828,9 +862,7 @@ function mergeSortieLists(remoteList, localList) {
     const id = String(s?.id || '');
     if (!id || deletedSortieIds.has(id)) continue;
     const prev = map.get(id);
-    if (!prev || Number(s.updatedAt || 0) >= Number(prev.updatedAt || 0)) {
-      map.set(id, s);
-    }
+    map.set(id, prev ? coalesceSortieVersions(prev, s) : s);
   }
   return [...map.values()];
 }
@@ -860,9 +892,10 @@ function sleep(ms) {
 function persist(opts = {}) {
   if (opts.sortieId) {
     const s = state.sorties.find((x) => x.id === opts.sortieId);
-    if (s) refreshSortieRoster(s);
+    if (s) refreshSortieRoster(s, { bumpUpdatedAt: true });
   } else {
-    for (const s of state.sorties) refreshSortieRoster(s);
+    // 名簿だけ等の更新では全出撃の updatedAt を進めない（他端末の新しい編成を潰す原因になる）
+    for (const s of state.sorties) refreshSortieRoster(s, { bumpUpdatedAt: false });
   }
   saveState(state);
   if (!opts.skipSync && boardReady) {
@@ -919,7 +952,8 @@ async function pushBoardNow() {
     for (const s of state.sorties) {
       compactEmptyParties(s, { keepTrailingEmpty: false });
       reconcileSortieAgainstMembers(s);
-      refreshSortieRoster(s);
+      // ここで updatedAt を進めると、編集していない端末の古い編成が「最新」扱いになり共有を潰す
+      refreshSortieRoster(s, { bumpUpdatedAt: false });
     }
 
     // 他端末の変更を取り込みつつ、ローカル削除・更新を優先マージ
