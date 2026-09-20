@@ -2312,7 +2312,7 @@ const HELP_TOPICS = [
       <ul class="help-modal-dot-list">
         <li><strong>メンバー: …</strong> … 選んだ人が1人でも参加しているレイドだけ表示</li>
         <li><strong>募集中</strong> … 空き枠があるレイドだけ表示（両方併用可）</li>
-        <li>同じ時間・同じメンバーで重なる枠は<strong>重複</strong>としてまとまります</li>
+        <li>同じ時間・同じメンバーで重なる枠は、リージョン違いや同トライアルでも<strong>重複</strong>としてまとまります</li>
         <li>行をタップするとメンバー編集を開けます</li>
       </ul>
     `,
@@ -3983,7 +3983,7 @@ function overlapClusterPartyEntries(groupItems) {
 
 /**
  * 同じ時間帯でメンバーがつながっている出撃を重複にする（連結成分）
- * 例: A∋P1, B∋P1+P2, C∋P2 → A・B・C を一つのクラスタにまとめる
+ * 同トライアルのリージョン違いも含む。例: A∋P1, B∋P1+P2, C∋P2 → A・B・C を一つのクラスタにまとめる
  * @returns {Map<string, string>} sortieId → overlapKey
  */
 function buildSortieOverlapKeyById(list) {
@@ -4040,12 +4040,6 @@ function buildSortieOverlapKeyById(list) {
 
     for (const idxs of comps.values()) {
       if (idxs.length < 2) continue;
-      const trialKeys = new Set(
-        idxs.map((i) =>
-          String(items[i].sortie.trialId || items[i].sortie.objective || items[i].sortie.id)
-        )
-      );
-      if (trialKeys.size < 2) continue;
       const key = `${slot}|cc${seq++}`;
       for (const i of idxs) out.set(items[i].sortie.id, key);
     }
