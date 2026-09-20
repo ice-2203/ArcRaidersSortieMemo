@@ -816,7 +816,8 @@ function noteLocalBoardChange() {
   boardPushPending = true;
 }
 
-/** 同じ id の出撃は updatedAt が新しい方を採用。同時刻なら中身が厚い方 */
+/** 同じ id の出撃は updatedAt が新しい方をそのまま採用。同時刻なら中身が厚い方。
+ *  ※人数が多い方を寄せると、パーティ解除が他端末の古い編成で復活してしまう */
 function preferSortieVersion(a, b) {
   if (!a) return b;
   if (!b) return a;
@@ -824,31 +825,6 @@ function preferSortieVersion(a, b) {
   const tb = Number(b.updatedAt || 0);
   if (ta !== tb) return ta > tb ? a : b;
   return sortieContentScore(a) >= sortieContentScore(b) ? a : b;
-}
-
-/**
- * 採用側に、非採用側のパーティ人数・枠が多い情報を寄せる（片方が古い編成のまま上書きする事故を防ぐ）
- */
-function coalesceSortieVersions(primary, secondary) {
-  if (!primary) return secondary;
-  if (!secondary) return primary;
-  const winner = preferSortieVersion(primary, secondary);
-  const other = winner === primary ? secondary : primary;
-  if (sortieContentScore(other) <= sortieContentScore(winner)) return winner;
-  const merged = {
-    ...winner,
-    parties: Array.isArray(winner.parties)
-      ? winner.parties.map((p) => (Array.isArray(p) ? [...p] : []))
-      : [[]],
-    partySizes: Array.isArray(winner.partySizes) ? [...winner.partySizes] : undefined,
-    partyTimingTags: Array.isArray(winner.partyTimingTags)
-      ? winner.partyTimingTags.map((t) => (Array.isArray(t) ? [...t] : []))
-      : undefined,
-    roster: winner.roster && typeof winner.roster === 'object' ? { ...winner.roster } : {},
-  };
-  mergeSortiePartiesInto(merged, other);
-  merged.updatedAt = Math.max(Number(primary.updatedAt || 0), Number(secondary.updatedAt || 0));
-  return merged;
 }
 
 function mergeSortieLists(remoteList, localList) {
@@ -862,7 +838,7 @@ function mergeSortieLists(remoteList, localList) {
     const id = String(s?.id || '');
     if (!id || deletedSortieIds.has(id)) continue;
     const prev = map.get(id);
-    map.set(id, prev ? coalesceSortieVersions(prev, s) : s);
+    map.set(id, prev ? preferSortieVersion(prev, s) : s);
   }
   return [...map.values()];
 }
@@ -1564,13 +1540,35 @@ async function removePartyGroupByIndex(sortieId, partyIndex) {
   ensurePartyTimingTags(sortie);
   compactEmptyParties(sortie, { keepTrailingEmpty: Boolean(modal && partySortieId) });
   syncSortieTimingTagsFromParties(sortie);
-  refreshSortieRoster(sortie);
-  sortie.updatedAt = Date.now();
-  persist({ sortieId });
+  refreshSortieRoster(sortie, { bumpUpdatedAt: true });
+  saveState(state);
   showToast(`パーティ${idx + 1}を解除しました`);
   if (!repaintPartyModal()) {
     render();
     if (state.sorties.some((s) => s.id === sortieId)) openPartyModal(sortieId);
+  }
+
+  if (boardReady) {
+    noteLocalBoardChange();
+    clearTimeout(boardPushTimer);
+    try {
+      await enqueueBoardPush();
+      showToast('共有にも反映しました');
+    } catch (e) {
+      console.warn('[board push]', e);
+      boardError = String(e.message || e);
+      const rateLimited = /rate limit|403|429/i.test(boardError);
+      showToast(
+        rateLimited
+          ? '端末では解除済み。共有が混み合っているため自動で再試行します'
+          : '端末では解除済み。共有への反映に失敗したため後で再試行します'
+      );
+      setTimeout(() => {
+        if (!boardReady) return;
+        noteLocalBoardChange();
+        enqueueBoardPush().catch(() => {});
+      }, 15000);
+    }
   }
   return true;
 }
