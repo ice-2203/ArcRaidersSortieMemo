@@ -909,6 +909,30 @@ function queueBoardPush() {
   }, 250);
 }
 
+/** 連続解除を1回の共有送信にまとめる */
+let deleteSyncTimer = null;
+/** @type {{ resolve: (v: boolean) => void, reject: (e: Error) => void }[]} */
+let deleteSyncWaiters = [];
+
+function flushDeleteSyncToBoard() {
+  noteLocalBoardChange();
+  clearTimeout(boardPushTimer);
+  clearTimeout(deleteSyncTimer);
+  return new Promise((resolve, reject) => {
+    deleteSyncWaiters.push({ resolve, reject });
+    deleteSyncTimer = setTimeout(async () => {
+      const waiters = deleteSyncWaiters;
+      deleteSyncWaiters = [];
+      try {
+        await enqueueBoardPush();
+        waiters.forEach((w) => w.resolve(true));
+      } catch (e) {
+        waiters.forEach((w) => w.reject(e instanceof Error ? e : new Error(String(e))));
+      }
+    }, 450);
+  });
+}
+
 /** 直列化した push（複数端末の競合を減らすため取得→マージ→保存） */
 function enqueueBoardPush() {
   boardPushPending = true;
@@ -966,6 +990,16 @@ async function pushBoardNow() {
       members: collapsed.members,
       deletedSorties: Object.fromEntries(deletedSortieIds),
     });
+
+    // サーバーが削除を受けていなければリトライ対象にする
+    for (const [id, at] of deletedSortieIds) {
+      const stillThere = (board.sorties || []).find((s) => String(s.id) === id);
+      if (!stillThere) continue;
+      const delAt = Number(board.deletedSorties?.[id] || at);
+      if (Number(stillThere.updatedAt || 0) <= delAt) {
+        throw new BoardSyncError('削除が共有に反映されませんでした', { status: 409, retryable: true });
+      }
+    }
 
     // 古い API が partySize / partySizes を落とす場合に備え、送信分を戻す
     const sentById = new Map(collapsed.sorties.map((s) => [String(s.id), s]));
@@ -1489,10 +1523,9 @@ async function removeSortieById(sortieId) {
   showToast('レイドを解除しました');
 
   if (boardReady) {
-    noteLocalBoardChange();
-    clearTimeout(boardPushTimer);
     try {
-      await enqueueBoardPush();
+      // 連続解除はデバウンスしてまとめて共有へ送る（途中の上書き競合を防ぐ）
+      await flushDeleteSyncToBoard();
       showToast('共有にも反映しました');
     } catch (e) {
       console.warn('[board push]', e);
@@ -1563,10 +1596,8 @@ async function removePartyGroupByIndex(sortieId, partyIndex) {
   }
 
   if (boardReady) {
-    noteLocalBoardChange();
-    clearTimeout(boardPushTimer);
     try {
-      await enqueueBoardPush();
+      await flushDeleteSyncToBoard();
       showToast('共有にも反映しました');
     } catch (e) {
       console.warn('[board push]', e);
