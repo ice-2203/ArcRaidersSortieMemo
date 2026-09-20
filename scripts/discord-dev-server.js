@@ -2,7 +2,7 @@ import http from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadBoard, saveBoard, sanitizeBoard } from '../lib/sortie-board.js';
+import { loadBoard, saveMergedBoard } from '../lib/sortie-board.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -102,7 +102,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'PUT') {
         const body = await readJsonBody(req);
-        const board = await saveBoard(sanitizeBoard(body || {}));
+        const board = await saveMergedBoard(body || {});
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(board));
         return;

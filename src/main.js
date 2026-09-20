@@ -754,16 +754,31 @@ function rememberRemoteBoard(board) {
   cachedRemoteBoard = {
     sorties: Array.isArray(board.sorties) ? board.sorties : [],
     members: Array.isArray(board.members) ? board.members : [],
+    deletedSorties:
+      board.deletedSorties && typeof board.deletedSorties === 'object' ? { ...board.deletedSorties } : {},
     updatedAt: Number(board.updatedAt) || Date.now(),
   };
   cachedRemoteAt = Date.now();
 }
 
-async function getRemoteBoardForMerge() {
-  // push 直前は必ず最新を取る（古いキャッシュで他端末の変更を潰さない）
-  const board = await fetchSharedBoard();
-  rememberRemoteBoard(board);
-  return board;
+/** サーバーの削除墓石を端末に取り込む */
+function absorbServerDeletedSorties(deletedSorties) {
+  if (!deletedSorties || typeof deletedSorties !== 'object') return;
+  let changed = false;
+  for (const [id, at] of Object.entries(deletedSorties)) {
+    const key = String(id || '');
+    const ts = Number(at);
+    if (!key || !Number.isFinite(ts)) continue;
+    const prev = deletedSortieIds.get(key) || 0;
+    if (ts > prev) {
+      deletedSortieIds.set(key, ts);
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveDeletedSortieMap(deletedSortieIds);
+    state.sorties = state.sorties.filter((s) => !deletedSortieIds.has(String(s.id)));
+  }
 }
 
 function loadDeletedSortieMap() {
@@ -799,10 +814,16 @@ function markSortieDeleted(sortieId) {
   saveDeletedSortieMap(deletedSortieIds);
 }
 
-function pruneDeletedSortieTombstones(remoteSorties) {
+function pruneDeletedSortieTombstones(remoteSorties, remoteDeleted = {}) {
   const remoteIds = new Set((remoteSorties || []).map((s) => String(s.id)));
+  const remoteDel =
+    remoteDeleted && typeof remoteDeleted === 'object' && !Array.isArray(remoteDeleted)
+      ? remoteDeleted
+      : {};
   let changed = false;
   for (const id of [...deletedSortieIds.keys()]) {
+    // サーバー側の墓石が残っている間は端末でも保持（再送できるようにする）
+    if (remoteDel[id]) continue;
     if (!remoteIds.has(id)) {
       deletedSortieIds.delete(id);
       changed = true;
@@ -932,18 +953,8 @@ async function pushBoardNow() {
       refreshSortieRoster(s, { bumpUpdatedAt: false });
     }
 
-    // 他端末の変更を取り込みつつ、ローカル削除・更新を優先マージ
-    let remote = { sorties: [], members: [], updatedAt: 0 };
-    try {
-      remote = await getRemoteBoardForMerge();
-    } catch (e) {
-      console.warn('[board push] remote fetch skipped', e);
-      if (cachedRemoteBoard) remote = cachedRemoteBoard;
-    }
-
-    const mergedSorties = mergeSortieLists(remote.sorties, state.sorties);
-    const mergedMembers = mergeMemberLists(remote.members, state.members);
-    const collapsed = collapseBoardDuplicates(mergedMembers, mergedSorties);
+    // 端末内の重複だけ畳む。他端末との競合解決はサーバー側マージに任せる
+    const collapsed = collapseBoardDuplicates(state.members, state.sorties);
     for (const id of collapsed.droppedSortieIds || []) markSortieDeleted(id);
     if (collapsed.droppedSortieIds?.length) {
       state.sorties = collapsed.sorties;
@@ -953,6 +964,7 @@ async function pushBoardNow() {
     const board = await pushSharedBoard({
       sorties: collapsed.sorties,
       members: collapsed.members,
+      deletedSorties: Object.fromEntries(deletedSortieIds),
     });
 
     // 古い API が partySize / partySizes を落とす場合に備え、送信分を戻す
@@ -986,7 +998,8 @@ async function pushBoardNow() {
     }
 
     rememberRemoteBoard(board);
-    pruneDeletedSortieTombstones(board.sorties);
+    absorbServerDeletedSorties(board.deletedSorties);
+    pruneDeletedSortieTombstones(board.sorties, board.deletedSorties);
     boardLastPushAt = Date.now();
 
     // push 中にさらにローカル変更がなければサーバ結果を反映
@@ -1029,6 +1042,7 @@ async function pullBoard({ migrateLocal = false } = {}) {
   }
 
   boardReady = true;
+  absorbServerDeletedSorties(board.deletedSorties);
   // 端末の新しい編集を共有の古い取得で潰さない（updatedAt でマージ）
   const mergedSorties = mergeSortieLists(board.sorties, localSorties);
   const mergedMembers = mergeMemberLists(board.members, localMembers);
@@ -1043,7 +1057,7 @@ async function pullBoard({ migrateLocal = false } = {}) {
     { repairPush: true }
   );
   rememberRemoteBoard(board);
-  pruneDeletedSortieTombstones(board.sorties);
+  pruneDeletedSortieTombstones(board.sorties, board.deletedSorties);
 
   const remoteById = new Map((board.sorties || []).map((s) => [String(s.id), s]));
   const localNewer = collapsed.sorties.some((s) => {

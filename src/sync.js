@@ -22,6 +22,18 @@ async function readErrorDetail(res) {
   }
 }
 
+function normalizeBoard(json) {
+  return {
+    sorties: Array.isArray(json?.sorties) ? json.sorties : [],
+    members: Array.isArray(json?.members) ? json.members : [],
+    deletedSorties:
+      json?.deletedSorties && typeof json.deletedSorties === 'object' && !Array.isArray(json.deletedSorties)
+        ? json.deletedSorties
+        : {},
+    updatedAt: Number(json?.updatedAt) || 0,
+  };
+}
+
 export async function fetchSharedBoard() {
   const res = await fetch('/api/sorties', {
     cache: 'no-store',
@@ -34,19 +46,14 @@ export async function fetchSharedBoard() {
       retryable: isRetryableStatus(res.status),
     });
   }
-  const json = await res.json();
-  return {
-    sorties: Array.isArray(json.sorties) ? json.sorties : [],
-    members: Array.isArray(json.members) ? json.members : [],
-    updatedAt: Number(json.updatedAt) || 0,
-  };
+  return normalizeBoard(await res.json());
 }
 
-export async function pushSharedBoard({ sorties, members }) {
+export async function pushSharedBoard({ sorties, members, deletedSorties = {} }) {
   const res = await fetch('/api/sorties', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ sorties, members }),
+    body: JSON.stringify({ sorties, members, deletedSorties }),
   });
   if (!res.ok) {
     const detail = await readErrorDetail(res);
@@ -56,10 +63,7 @@ export async function pushSharedBoard({ sorties, members }) {
       retryable,
     });
   }
-  const json = await res.json();
-  return {
-    sorties: Array.isArray(json.sorties) ? json.sorties : [],
-    members: Array.isArray(json.members) ? json.members : [],
-    updatedAt: Number(json.updatedAt) || Date.now(),
-  };
+  const board = normalizeBoard(await res.json());
+  if (!board.updatedAt) board.updatedAt = Date.now();
+  return board;
 }

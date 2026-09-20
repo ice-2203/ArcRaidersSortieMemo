@@ -1,4 +1,4 @@
-import { loadBoard, saveBoard, sanitizeBoard } from '../lib/sortie-board.js';
+import { loadBoard, saveMergedBoard } from '../lib/sortie-board.js';
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -39,7 +39,8 @@ export default async function handler(req, res) {
         res.status(400).json({ error: 'Invalid JSON' });
         return;
       }
-      const board = await saveBoard(sanitizeBoard(body));
+      // sortie / member 単位でサーバーが最新を採用してマージ保存
+      const board = await saveMergedBoard(body);
       res.status(200).json(board);
       return;
     }
