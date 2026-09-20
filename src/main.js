@@ -248,6 +248,12 @@ function visibleTrials() {
 }
 /** 出撃メンバー登録ポップを開いている出撃ID */
 let partySortieId = null;
+/** パーティモーダルで実際に編成を変えたか（閲覧だけ閉じるときは共有へ送らない） */
+let partyModalDirty = false;
+
+function markPartyModalDirty() {
+  if (partySortieId) partyModalDirty = true;
+}
 let modal = null;
 let toastTimer = null;
 let clockTimer = null;
@@ -428,6 +434,7 @@ function togglePartyTimingTag(sortie, partyIndex, tagId) {
     : [...cur, tagId];
   syncSortieTimingTagsFromParties(sortie);
   sortie.updatedAt = Date.now();
+  markPartyModalDirty();
   persist({ sortieId: sortie.id });
 }
 
@@ -1109,19 +1116,27 @@ async function pullBoard({ migrateLocal = false } = {}) {
 function startBoardPolling() {
   clearInterval(boardPullTimer);
   boardPullTimer = setInterval(() => {
-    if (document.hidden || boardSyncing || boardPushPending || (modal && partySortieId)) return;
+    if (document.hidden || boardSyncing || boardPushPending) return;
+    // 編集中だけ拉取を止める。閲覧中は取り込み、他端末の除外を反映する
+    if (modal && partySortieId && partyModalDirty) return;
     pullBoard()
-      .then(() => refreshUi())
+      .then(() => {
+        if (modal && partySortieId) repaintPartyModal({ light: true });
+        else refreshUi();
+      })
       .catch((e) => {
         console.warn('[board pull]', e);
       });
   }, BOARD_POLL_MS);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && !boardPushPending && !(modal && partySortieId)) {
-      pullBoard()
-        .then(() => refreshUi())
-        .catch(() => {});
-    }
+    if (document.hidden || boardPushPending) return;
+    if (modal && partySortieId && partyModalDirty) return;
+    pullBoard()
+      .then(() => {
+        if (modal && partySortieId) repaintPartyModal({ light: true });
+        else refreshUi();
+      })
+      .catch(() => {});
   });
 }
 
@@ -1516,7 +1531,9 @@ async function removeSortieById(sortieId) {
   if (wasOpen) {
     modal = null;
     partySortieId = null;
+    partyModalDirty = false;
     openPartyModal._repaint = null;
+    openPartyModal._flushPendingFill = null;
     document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
   }
   render();
@@ -2325,9 +2342,11 @@ async function copyText(text) {
 function closeModal({ keepParty = false } = {}) {
   const closingParty = Boolean(partySortieId) && !keepParty;
   const editedSortieId = closingParty ? partySortieId : null;
+  let dirty = partyModalDirty;
   // 確定前のメンバー選択を閉じるだけで捨てない
   if (closingParty && typeof openPartyModal._flushPendingFill === 'function') {
-    openPartyModal._flushPendingFill();
+    const changed = openPartyModal._flushPendingFill();
+    if (changed) dirty = true;
   }
   modal = null;
   openPartyModal._repaint = null;
@@ -2335,12 +2354,18 @@ function closeModal({ keepParty = false } = {}) {
   document.querySelector('.modal-backdrop')?.remove();
   if (!keepParty) {
     partySortieId = null;
+    partyModalDirty = false;
   }
-  // パーティ編集は閉じるときに空枠を掃除し、共有ボードへ保存＆背面更新
+  // 編集した場合だけ共有へ送る。閲覧して閉じただけでは updatedAt を進めない
+  // （古い編成に新しい時刻が付き、他端末のメンバー除外が戻るのを防ぐ）
   if (closingParty) {
     const s = editedSortieId ? state.sorties.find((x) => x.id === editedSortieId) : null;
     if (s) compactEmptyParties(s, { keepTrailingEmpty: false });
-    persist(editedSortieId ? { sortieId: editedSortieId } : {});
+    if (dirty) {
+      persist(editedSortieId ? { sortieId: editedSortieId } : {});
+    } else {
+      saveState(state);
+    }
     render();
   }
 }
@@ -2657,6 +2682,7 @@ function removeSortieMember(sortieId, memberId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie || !memberId) return;
   removeMemberFromParties(sortie, memberId);
+  markPartyModalDirty();
   // 閉じる前でも共有へ送れるよう、デバウンス付きで同期する
   persist({ sortieId });
   if (!repaintPartyModal({ light: true })) {
@@ -2674,6 +2700,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
   if (current === partyIndex) {
     if (toggleIfSame) {
       removeMemberFromParties(sortie, memberId);
+      markPartyModalDirty();
       persist({ sortieId });
       if (!repaintPartyModal({ light: true })) {
         render();
@@ -2692,6 +2719,7 @@ function placeSortieMember(sortieId, memberId, partyIndex, { toggleIfSame = true
     showToast(`パーティ${partyIndex + 1}は満員です（最大${size}人・${partySizeLabel(size)}）`);
     return;
   }
+  markPartyModalDirty();
   persist({ sortieId });
   if (!repaintPartyModal({ light: true })) {
     render();
@@ -2705,9 +2733,11 @@ function openPartyModal(sortieId) {
   const sortie = state.sorties.find((s) => s.id === sortieId);
   if (!sortie) {
     partySortieId = null;
+    partyModalDirty = false;
     return;
   }
   partySortieId = sortieId;
+  partyModalDirty = false;
   ensureParties(sortie);
 
   const backdrop = document.createElement('div');
@@ -2794,6 +2824,7 @@ function openPartyModal(sortieId) {
     if (!live) return;
     if (partySizeAt(live, partyIndex) === next) return;
     const { trimmed } = setPartyGroupSize(live, partyIndex, next);
+    markPartyModalDirty();
     persist({ sortieId });
     if (fillPartyIndex === partyIndex) {
       if (fillSelected.size > next) {
@@ -2827,23 +2858,29 @@ function openPartyModal(sortieId) {
     // モーダル中は末尾の空枠（+ 追加）を残し、途中の空だけ詰める
     if (wasOpen) {
       compactEmptyParties(getSortie(), { keepTrailingEmpty: true });
-      persist({ sortieId });
+      // 編成変更済みのときだけ共有へ（閲覧戻りの時刻更新を避ける）
+      if (partyModalDirty) persist({ sortieId });
+      else saveState(state);
       paintParties();
       updateMemberMarks();
     }
   };
 
   const flushPendingFill = () => {
-    if (fillPartyIndex == null) return;
+    if (fillPartyIndex == null) return false;
     const live = getSortie();
     if (!live) {
       fillPartyIndex = null;
       fillSelected = new Set();
-      return;
+      return false;
     }
+    const before = JSON.stringify(live.parties || []);
     setPartyMembers(live, fillPartyIndex, [...fillSelected]);
+    const changed = JSON.stringify(live.parties || []) !== before;
+    if (changed) markPartyModalDirty();
     fillPartyIndex = null;
     fillSelected = new Set();
+    return changed;
   };
 
   const bindMemberDrag = (el, memberId) => {
@@ -2883,6 +2920,7 @@ function openPartyModal(sortieId) {
     const size = partySizeAt(live, gi);
     const count = Math.min(fillSelected.size, size);
     setPartyMembers(live, gi, [...fillSelected]);
+    markPartyModalDirty();
     persist({ sortieId });
     closeFillSheet();
     if (!repaintPartyModal()) {
@@ -3354,6 +3392,7 @@ function openPartyModal(sortieId) {
     const live = getSortie();
     const before = ensureParties(live).length;
     const res = addEmptyParty(live);
+    markPartyModalDirty();
     persist({ sortieId });
     if (!repaintPartyModal()) {
       openPartyModal(sortieId);
@@ -3369,6 +3408,14 @@ function openPartyModal(sortieId) {
 
   backdrop.appendChild(modalEl);
   openModal(backdrop);
+  // 開いた直後に共有の最新を取り込み（古い編成のまま閉じる事故を防ぐ）
+  if (boardReady && !boardPushPending) {
+    pullBoard()
+      .then(() => {
+        if (partySortieId === sortieId && modal) repaintPartyModal({ light: true });
+      })
+      .catch(() => {});
+  }
 }
 
 function esc(s) {
