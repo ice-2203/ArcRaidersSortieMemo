@@ -2234,9 +2234,17 @@ function openSlotContextMenu({ clientX, clientY, preferAbove = false, excludedPr
 }
 
 async function handleOpenSlotClick(trial, slot, ev, { excludedPreview = false } = {}) {
-  if (!excludedPreview && isRegisteredSlot(slot, trial.id)) {
-    openSlotParty(trial, slot);
-    return;
+  if (!excludedPreview) {
+    const sortie = findSortieForSlot(slot, trial.id);
+    if (sortie) {
+      // 「すべて」＋絞り込み中は、非表示にした他メンバー予約を誤って開かない
+      if (schedFilter === 'all' && !sortieReservationVisible(sortie)) {
+        showToast('絞り込み中のため、この枠の予約は表示していません');
+        return;
+      }
+      openSlotParty(trial, slot);
+      return;
+    }
   }
   const preferAbove = ev?.pointerType === 'touch' || ev?.type === 'touchend';
   const action = await openSlotContextMenu({
@@ -2246,6 +2254,11 @@ async function handleOpenSlotClick(trial, slot, ev, { excludedPreview = false } 
     excludedPreview,
   });
   if (action === 'book') {
+    const existing = findSortieForSlot(slot, trial.id);
+    if (existing && schedFilter === 'all' && !sortieReservationVisible(existing)) {
+      showToast('この枠は他メンバーの予約があります（絞り込みで非表示）');
+      return;
+    }
     openSlotParty(trial, slot);
   } else if (action === 'exclude') {
     excludeSlot(slot);
@@ -2440,8 +2453,8 @@ const HELP_TOPICS = [
     body: `
       <p class="help-modal-para">上部の<strong>レイド</strong>表示では、予約を時間順のタイムラインで見られます。</p>
       <ul class="help-modal-dot-list">
-        <li><strong>メンバー: …</strong> … 選んだ人が1人でも参加しているレイドだけ表示</li>
-        <li><strong>募集中</strong> … 空き枠があるレイドだけ表示（両方併用可）</li>
+        <li><strong>メンバー: …</strong> … 「レイド」では参加レイドだけ。「すべて」では枠はそのまま、選んだ人が入っていない予約だけ非表示</li>
+        <li><strong>募集中</strong> … 空き枠がある予約だけ強調／表示（両方併用可）</li>
         <li>同じ時間・同じメンバーで重なる枠は、リージョン違いや同トライアルでも<strong>重複</strong>としてまとまります</li>
         <li>行をタップするとメンバー編集を開けます</li>
       </ul>
@@ -3842,12 +3855,9 @@ function renderTrialCard(trial) {
   const showExcluded =
     schedFilter !== 'registered' && !!trialShowExcludedPreview[String(trial.id)];
 
-  let visible = matching.filter((slot) => {
-    const ex = isSlotExcluded(slot);
-    if (ex && !showExcluded) return false;
-    if (schedFilter === 'registered') return isRegisteredSlot(slot, trial.id);
-    return true;
-  });
+  let visible = matching.filter((slot) =>
+    slotVisibleInTrialCard(slot, trial.id, { showExcluded })
+  );
 
   if (excludedForTrial.length && schedFilter !== 'registered') {
     const toggle = document.createElement('button');
@@ -3890,11 +3900,23 @@ function renderTrialCard(trial) {
     }
     sched.appendChild(empty);
   } else {
+    // 同時刻（startAt）の予約件数。絞り込み中は表示対象の予約だけ数える
+    /** @type {Map<number, number>} */
+    const reservedCountByStart = new Map();
+    for (const s of state.sorties) {
+      if (!sortieReservationVisible(s)) continue;
+      const t = new Date(s.startAt).getTime();
+      if (!Number.isFinite(t)) continue;
+      reservedCountByStart.set(t, (reservedCountByStart.get(t) || 0) + 1);
+    }
+
     for (const slot of visible) {
       const remain = remainText(slot.startMs, slot.endMs);
       const sortie = findSortieForSlot(slot, trial.id);
-      const registered = !!sortie;
+      // 「すべて」では枠は全部出し、予約表示だけメンバー等で絞る
+      const registered = !!sortie && sortieReservationVisible(sortie);
       const excludedPreview = isSlotExcluded(slot) && showExcluded;
+      const sameTimeCount = reservedCountByStart.get(slot.startMs) || 0;
       const { start, end } = fmtSlotRange(slot.startMs, slot.endMs);
       const row = document.createElement('button');
       row.type = 'button';
@@ -3941,6 +3963,14 @@ function renderTrialCard(trial) {
       tag.className = 'tag';
       tag.textContent = slot.map;
       row2.append(evLine, tag);
+      // 時刻行ではなくイベント行に載せ、独立した改行を避ける
+      if (!excludedPreview && sameTimeCount > (registered ? 1 : 0)) {
+        const chip = document.createElement('span');
+        chip.className = 'slot-same-time';
+        chip.textContent = '他予約';
+        chip.title = '同じ日付・同じ開始時刻に、別のトライアル／リージョンの予約があります';
+        row2.appendChild(chip);
+      }
 
       const foot = document.createElement('div');
       foot.className = 'slot-foot';
@@ -4469,22 +4499,22 @@ function renderOverlapCluster(groupItems) {
   return cluster;
 }
 
-/** 「出撃のみ」：時間順の縦一覧 */
-function renderRegisteredTimeline() {
-  const root = document.createElement('div');
-  root.className = 'sortie-timeline-shell';
-
-  // 名簿に無い選択IDは落とす
+/** 名簿に無いメンバー絞り込みIDを落とす */
+function pruneMemberFilterIds() {
   const known = new Set(state.members.map((m) => m.id));
-  let filterDirty = false;
+  let dirty = false;
   for (const id of [...memberFilterIds]) {
     if (!known.has(id)) {
       memberFilterIds.delete(id);
-      filterDirty = true;
+      dirty = true;
     }
   }
-  if (filterDirty) saveMemberFilterIds(memberFilterIds);
+  if (dirty) saveMemberFilterIds(memberFilterIds);
+}
 
+/** メンバー／募集中の絞り込みバー（レイド一覧・すべて共通） */
+function buildMemberFilterBar() {
+  pruneMemberFilterIds();
   const filterBar = document.createElement('div');
   filterBar.className = 'member-filter-bar';
   const openBtn = document.createElement('button');
@@ -4493,7 +4523,9 @@ function renderRegisteredTimeline() {
   openBtn.textContent = memberFilterSummaryText();
   openBtn.title = memberFilterIds.size
     ? `メンバー絞り込み中（${memberFilterIds.size}人）· タップで変更`
-    : 'メンバーでレイドを絞り込み';
+    : schedFilter === 'all'
+      ? 'メンバーで予約表示を絞り込み（枠一覧はそのまま）'
+      : 'メンバーでレイドを絞り込み';
   openBtn.setAttribute(
     'aria-label',
     memberFilterIds.size ? `メンバー絞り込み: ${memberFilterSummaryText()}` : 'メンバーで絞り込み'
@@ -4516,7 +4548,7 @@ function renderRegisteredTimeline() {
   });
   filterBar.appendChild(recruitBtn);
 
-  if (memberFilterIds.size > 0) {
+  if (memberFilterIds.size > 0 || recruitFilterOnly) {
     const clear = document.createElement('button');
     clear.type = 'button';
     clear.className = 'btn btn-ghost member-filter-clear';
@@ -4524,11 +4556,39 @@ function renderRegisteredTimeline() {
     clear.addEventListener('click', () => {
       memberFilterIds = new Set();
       saveMemberFilterIds(memberFilterIds);
+      recruitFilterOnly = false;
+      saveRecruitFilterOnly(false);
       render();
     });
     filterBar.appendChild(clear);
   }
-  root.appendChild(filterBar);
+  return filterBar;
+}
+
+/**
+ * スケジュール枠を一覧に出すか（除外以外は「すべて」で全枠表示）
+ * @returns {boolean}
+ */
+function slotVisibleInTrialCard(slot, trialId, { showExcluded }) {
+  const ex = isSlotExcluded(slot);
+  if (ex && !showExcluded) return false;
+  if (schedFilter === 'registered') return isRegisteredSlot(slot, trialId);
+  return true;
+}
+
+/** 「すべて」で予約内容を見せるか（メンバー／募集中の絞り込み） */
+function sortieReservationVisible(sortie) {
+  if (!sortie) return false;
+  if (memberFilterIds.size > 0 && !sortieMatchesMemberFilter(sortie)) return false;
+  if (recruitFilterOnly && !sortieIsRecruiting(sortie)) return false;
+  return true;
+}
+
+/** 「出撃のみ」：時間順の縦一覧 */
+function renderRegisteredTimeline() {
+  const root = document.createElement('div');
+  root.className = 'sortie-timeline-shell';
+  root.appendChild(buildMemberFilterBar());
 
   const scroller = document.createElement('div');
   scroller.className = 'sortie-timeline';
@@ -4766,10 +4826,17 @@ function render(opts = {}) {
       main.className = 'sortie-timeline-wrap';
       main.appendChild(renderLoadingSkeleton('rail'));
     } else if (loadError) {
-      main.className = 'trial-rail';
-      main.innerHTML = `<div class="empty-sorties"><p class="empty-sorties-msg">${esc(loadError)}</p></div>`;
+      main.className = 'trial-schedule-shell';
+      main.appendChild(buildMemberFilterBar());
+      const rail = document.createElement('div');
+      rail.className = 'trial-rail';
+      rail.innerHTML = `<div class="empty-sorties"><p class="empty-sorties-msg">${esc(loadError)}</p></div>`;
+      main.appendChild(rail);
     } else if (!trials.length) {
-      main.className = 'trial-rail';
+      main.className = 'trial-schedule-shell';
+      main.appendChild(buildMemberFilterBar());
+      const rail = document.createElement('div');
+      rail.className = 'trial-rail';
       const empty = document.createElement('div');
       empty.className = 'empty-sorties';
       const msg = document.createElement('p');
@@ -4794,14 +4861,19 @@ function render(opts = {}) {
         actions.appendChild(toNext);
       }
       empty.append(msg, actions);
-      main.appendChild(empty);
+      rail.appendChild(empty);
+      main.appendChild(rail);
     } else {
-      main.className = 'trial-rail';
+      main.className = 'trial-schedule-shell';
+      main.appendChild(buildMemberFilterBar());
+      const rail = document.createElement('div');
+      rail.className = 'trial-rail';
       trials.forEach((t, i) => {
         const card = renderTrialCard(t);
         card.style.setProperty('--card-i', String(Math.min(i, 8)));
-        main.appendChild(card);
+        rail.appendChild(card);
       });
+      main.appendChild(rail);
     }
   }
 

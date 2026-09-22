@@ -949,6 +949,23 @@ input {
   color: var(--text);
 }
 
+/* 同じ日時に別枠の予約（イベント行にインライン） */
+.slot-same-time {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+  color: #e8a54b;
+  border: 1px solid rgba(232, 165, 75, 0.55);
+  background: rgba(232, 165, 75, 0.12);
+  white-space: nowrap;
+}
+
 /* 実施中：緑＋左アクセント（予約済みでもライブ優先） */
 .mp-time-item.is-live {
   opacity: 1;
@@ -1782,6 +1799,28 @@ input {
   animation: ui-fade var(--motion) var(--motion-ease) both;
   display: flex;
   flex-direction: column;
+}
+
+/* 「すべて」：メンバー絞り込み＋横スクロールレール */
+.trial-schedule-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  height: 0;
+  overflow: hidden;
+  width: 100%;
+  animation: ui-fade var(--motion) var(--motion-ease) both;
+}
+
+.trial-schedule-shell > .member-filter-bar {
+  flex: 0 0 auto;
+}
+
+.trial-schedule-shell > .trial-rail {
+  flex: 1 1 0;
+  min-height: 0;
+  height: 0;
 }
 
 .sortie-timeline-shell {
